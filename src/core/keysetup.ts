@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { ConnectionConfig } from '../types';
 import { switchConnectionToKey } from './config';
-import type { SshSession } from './connection';
+import { type SshSession, connect } from './connection';
 import { ConnectionError } from './errors';
 
 // Candidate local public keys, in preference order. Mirrors ssh's own default
@@ -78,12 +78,15 @@ export interface SetupKeyResult {
   alreadyPresent: boolean;
   privateKeyPath: string;
   configUpdated: boolean;
+  verified: boolean; // key login was confirmed by a fresh connection
 }
 
 // End-to-end ssh-copy-id: resolve the local public key, install it on the
-// already-authenticated remote, and (when a configPath is given and the
-// connection is a saved one) rewrite that connection to use key auth, dropping
-// the plaintext password. Returns what happened so the caller can report it.
+// already-authenticated remote, then VERIFY key auth actually logs in via a
+// fresh key-only connection BEFORE rewriting config. We only drop the stored
+// password (switchConnectionToKey) once the key is proven to work — otherwise a
+// key that installed but is refused at login (bad remote perms, NFS root_squash,
+// passphrase-protected key) would lock the user out of their saved connection.
 export async function setupKey(
   session: SshSession,
   conn: ConnectionConfig,
@@ -92,10 +95,36 @@ export async function setupKey(
   const { publicKey, privateKeyPath } = await resolveLocalPublicKey(conn);
   const { alreadyPresent } = await installPublicKey(session, publicKey);
 
+  // Prove key auth works by opening a fresh connection with the key and NO
+  // password. If this throws, the key isn't usable yet — leave config untouched.
+  // connect() reads privateKeyPath verbatim (only loadConfig expands ~/), so
+  // expand here or the probe would fail to read a ~/.ssh key and falsely report
+  // the key as unusable.
+  const keyOnly: ConnectionConfig = {
+    ...conn,
+    privateKeyPath: expandHome(privateKeyPath),
+    password: undefined,
+  };
+  let verified = false;
+  try {
+    const probe = await connect(keyOnly);
+    probe.close();
+    verified = true;
+  } catch (cause) {
+    throw new ConnectionError(
+      `Key was installed on the remote but key login could not be verified, so the saved ` +
+        `password was kept. Check the remote's ~/.ssh permissions (dir 700, authorized_keys 600) ` +
+        `and that ${privateKeyPath} is the right key. Underlying error: ${
+          cause instanceof Error ? cause.message : String(cause)
+        }`,
+      { cause },
+    );
+  }
+
   let configUpdated = false;
   if (configPath) {
     await switchConnectionToKey(configPath, conn.name, privateKeyPath);
     configUpdated = true;
   }
-  return { alreadyPresent, privateKeyPath, configUpdated };
+  return { alreadyPresent, privateKeyPath, configUpdated, verified };
 }
