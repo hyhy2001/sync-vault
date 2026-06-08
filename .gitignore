@@ -3,6 +3,10 @@ dist/
 *.log
 .DS_Store
 
+# local agent / editor scratch
+CLAUDE.md
+.claude/
+
 # per-deployment config (use sync_vault_config.example.json as template)
 config/sync_vault_config.json
 sync_vault_config.json
