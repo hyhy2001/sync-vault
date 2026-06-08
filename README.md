@@ -177,4 +177,4 @@ bun run lint       # biome
   - Prefer keys for anything sensitive.
 - Passwords are fed to `rsync`/`scp`/`ssh` via `sshpass` using the `SSHPASS` environment variable, never on the command line — so they don't leak through `ps`. Passwords are never written to the audit log.
 - If `sshpass` isn't installed on the machine running sync-vault, password transfers fall back to the built-in SFTP automatically (slower, but no extra dependency).
-- Host-key verification against `~/.ssh/known_hosts` is wired in `connection.ts` (see the trust-on-first-use TODO there before relying on it in hostile networks).
+- Host keys are pinned against `~/.ssh/known_hosts` (`connection.ts`): a key matching the file is accepted, an unknown host is recorded on first use (trust-on-first-use), and a host whose key has **changed** is rejected — the connection fails rather than silently trusting a possible man-in-the-middle.

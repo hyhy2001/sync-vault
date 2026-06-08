@@ -5,6 +5,14 @@ import { Client } from 'ssh2';
 import type { ClientChannel, ConnectConfig, SFTPWrapper } from 'ssh2';
 import type { ConnectionConfig } from '../types';
 import { ConnectionError } from './errors';
+import {
+  type KnownHostEntry,
+  appendKnownHost,
+  checkHostKey,
+  formatKnownHostLine,
+  knownHostsPath,
+  loadKnownHosts,
+} from './known-hosts';
 
 const READY_TIMEOUT_MS = 20_000;
 
@@ -65,15 +73,28 @@ export class SshSession {
   }
 }
 
-// TODO(known_hosts): We do not yet parse ~/.ssh/known_hosts to pin host keys.
-// ssh2's hostVerifier receives the server key; a full implementation would load
-// known_hosts, match host:port, and compare the base64 key. For now we log the
-// fingerprint via the hostVerifier hook and accept it (trust-on-first-use) — this
-// is an explicit, visible decision, NOT a silent disable of host verification.
-function makeHostVerifier(host: string): ConnectConfig['hostVerifier'] {
-  return (_key: Buffer): boolean => {
-    // Accept the key (TOFU). See TODO above for known_hosts pinning.
-    void host;
+// Pin the server key against ~/.ssh/known_hosts. We load the file up front
+// (ssh2's hostVerifier is synchronous) and decide:
+//   match    -> accept
+//   mismatch -> reject (same host+keytype recorded with a different key: the
+//               MITM signal); the connection then fails with a host-key error
+//   unknown  -> accept and append the key (trust-on-first-use), so a later key
+//               change is caught as a mismatch
+function makeHostVerifier(
+  conn: ConnectionConfig,
+  entries: KnownHostEntry[],
+  khPath: string,
+): ConnectConfig['hostVerifier'] {
+  return (key: Buffer): boolean => {
+    const result = checkHostKey(entries, conn.host, conn.port, key);
+    if (result === 'match') return true;
+    if (result === 'mismatch') return false;
+    // unknown -> TOFU: record the key so future changes are detected.
+    try {
+      appendKnownHost(khPath, formatKnownHostLine(conn.host, conn.port, key));
+    } catch {
+      // Recording is best-effort; still accept on first sight.
+    }
     return true;
   };
 }
@@ -87,12 +108,14 @@ async function loadPrivateKey(path: string): Promise<Buffer> {
 }
 
 export async function connect(conn: ConnectionConfig): Promise<SshSession> {
+  const khPath = knownHostsPath();
+  const knownHosts = await loadKnownHosts(khPath);
   const connectConfig: ConnectConfig = {
     host: conn.host,
     port: conn.port,
     username: conn.username,
     readyTimeout: READY_TIMEOUT_MS,
-    hostVerifier: makeHostVerifier(conn.host),
+    hostVerifier: makeHostVerifier(conn, knownHosts, khPath),
   };
 
   if (conn.privateKeyPath) {
