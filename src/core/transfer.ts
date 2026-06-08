@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdir, rename, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { basename, dirname, join, posix, relative, sep } from 'node:path';
 import { PassThrough } from 'node:stream';
 import type { SFTPWrapper } from 'ssh2';
@@ -101,10 +103,23 @@ export function wrapSshpass(
   return [cmd, args];
 }
 
-// Argv form: ['-p','22','-i','/key','-o','BatchMode=yes']. BatchMode makes ssh
-// fail fast instead of prompting when key auth is unavailable. Under password
-// auth we drop BatchMode (it forbids prompts) and force the password path so
-// sshpass can feed the credential.
+// Unix-socket path for SSH connection multiplexing. A short hash of the
+// destination keeps it well under the ~104-char socket-path limit and stable
+// across the spawns of a single run (and reruns to the same host).
+function controlPath(conn: ConnectionConfig): string {
+  const id = createHash('sha256')
+    .update(`${conn.username}@${conn.host}:${conn.port}`)
+    .digest('hex')
+    .slice(0, 16);
+  return join(tmpdir(), `sv-${id}.sock`);
+}
+
+// Argv form: ['-p','22','-i','/key','-o','BatchMode=yes', ...]. BatchMode makes
+// ssh fail fast instead of prompting when key auth is unavailable. Under
+// password auth we drop BatchMode (it forbids prompts) and force the password
+// path so sshpass can feed the credential. ControlMaster multiplexes one SSH
+// connection across the rsync/scp/ssh processes a run spawns, so N files cost
+// ONE handshake; the master is torn down explicitly when the run finishes.
 export function buildSshArgs(conn: ConnectionConfig): string[] {
   const args = ['-p', String(conn.port)];
   if (conn.privateKeyPath) args.push('-i', conn.privateKeyPath);
@@ -113,11 +128,35 @@ export function buildSshArgs(conn: ConnectionConfig): string[] {
   } else {
     args.push('-o', 'BatchMode=yes');
   }
+  args.push(
+    '-o',
+    'ControlMaster=auto',
+    '-o',
+    `ControlPath=${controlPath(conn)}`,
+    '-o',
+    'ControlPersist=30',
+  );
   return args;
 }
 
 function buildSshTransportArg(conn: ConnectionConfig): string {
   return ['ssh', ...buildSshArgs(conn)].join(' ');
+}
+
+// Close the multiplexing master (best-effort) so a run doesn't leave a lingering
+// background ssh. A no-op when no master exists (pure-sftp transfers).
+function closeSshMaster(conn: ConnectionConfig): Promise<void> {
+  return new Promise((res) => {
+    const child = spawn('ssh', [
+      '-o',
+      `ControlPath=${controlPath(conn)}`,
+      '-O',
+      'exit',
+      `${conn.username}@${conn.host}`,
+    ]);
+    child.on('error', () => res());
+    child.on('close', () => res());
+  });
 }
 
 interface FileTotals {
@@ -885,71 +924,77 @@ export async function runTransfer(opts: RunTransferOptions): Promise<TransferSum
     totalBytesTransferred: 0,
   };
 
-  // rsync handles both files and directories natively in its single loop.
-  if (opts.transport === 'rsync') {
-    const summary = await runRsync(opts, totals);
-    opts.onEvent({ type: 'all-done', summary });
-    return summary;
-  }
-
-  if (opts.transport === 'scp' || opts.transport === 'sftp') {
-    // Partition while preserving original indices for progress display. Files keep
-    // the existing per-transport path; directories route to tar-pipe or sftp-recursive.
-    const fileItems = opts.items.filter((it) => !it.isDirectory);
-    const dirItems = opts.items.map((it, i) => ({ it, i })).filter(({ it }) => it.isDirectory);
-
-    let filesTransferred = 0;
-    let filesFailed = 0;
-    let bytesTransferred = 0;
-    const errors: string[] = [];
-
-    // FILE items: reuse the existing runner with a shallow-cloned opts. Its internal
-    // index/total are relative to fileItems (not the original list); acceptable.
-    if (fileItems.length > 0) {
-      const fileOpts: RunTransferOptions = { ...opts, items: fileItems };
-      const runner = opts.transport === 'scp' ? runScp : runSftp;
-      const fileSummary = await runner(fileOpts, totals);
-      filesTransferred += fileSummary.filesTransferred;
-      filesFailed += fileSummary.filesFailed;
-      bytesTransferred += fileSummary.bytesTransferred;
-      errors.push(...fileSummary.errors);
+  try {
+    // rsync handles both files and directories natively in its single loop.
+    if (opts.transport === 'rsync') {
+      const summary = await runRsync(opts, totals);
+      opts.onEvent({ type: 'all-done', summary });
+      return summary;
     }
 
-    // DIRECTORY items: probe tar availability ONCE (skip entirely if no dirs). Use
-    // tar-pipe when both ends have tar, else the sftp-recursive fallback.
-    if (dirItems.length > 0) {
-      const [local, remote] = await Promise.all([probeLocal(), probeRemote(opts.session)]);
-      const useTar = local.tar && remote.tar;
-      const total = opts.items.length;
-      for (const { it, i } of dirItems) {
-        const result = useTar
-          ? await runTarPipe(opts, it, totals, i, total)
-          : await runSftpRecursive(opts, it, totals, i, total);
-        if (result.ok) {
-          filesTransferred++;
-          bytesTransferred += result.bytes;
-          totals.totalBytesTransferred += it.size;
-          onEventDirDone(opts, it);
-        } else {
-          filesFailed++;
-          errors.push(`${it.sourcePath}: ${result.error ?? 'directory transfer failed'}`);
-          opts.onEvent({ type: 'file-error', item: it, error: result.error ?? 'failed' });
+    if (opts.transport === 'scp' || opts.transport === 'sftp') {
+      // Partition while preserving original indices for progress display. Files keep
+      // the existing per-transport path; directories route to tar-pipe or sftp-recursive.
+      const fileItems = opts.items.filter((it) => !it.isDirectory);
+      const dirItems = opts.items.map((it, i) => ({ it, i })).filter(({ it }) => it.isDirectory);
+
+      let filesTransferred = 0;
+      let filesFailed = 0;
+      let bytesTransferred = 0;
+      const errors: string[] = [];
+
+      // FILE items: reuse the existing runner with a shallow-cloned opts. Its internal
+      // index/total are relative to fileItems (not the original list); acceptable.
+      if (fileItems.length > 0) {
+        const fileOpts: RunTransferOptions = { ...opts, items: fileItems };
+        const runner = opts.transport === 'scp' ? runScp : runSftp;
+        const fileSummary = await runner(fileOpts, totals);
+        filesTransferred += fileSummary.filesTransferred;
+        filesFailed += fileSummary.filesFailed;
+        bytesTransferred += fileSummary.bytesTransferred;
+        errors.push(...fileSummary.errors);
+      }
+
+      // DIRECTORY items: probe tar availability ONCE (skip entirely if no dirs). Use
+      // tar-pipe when both ends have tar, else the sftp-recursive fallback.
+      if (dirItems.length > 0) {
+        const [local, remote] = await Promise.all([probeLocal(), probeRemote(opts.session)]);
+        const useTar = local.tar && remote.tar;
+        const total = opts.items.length;
+        for (const { it, i } of dirItems) {
+          const result = useTar
+            ? await runTarPipe(opts, it, totals, i, total)
+            : await runSftpRecursive(opts, it, totals, i, total);
+          if (result.ok) {
+            filesTransferred++;
+            bytesTransferred += result.bytes;
+            totals.totalBytesTransferred += it.size;
+            onEventDirDone(opts, it);
+          } else {
+            filesFailed++;
+            errors.push(`${it.sourcePath}: ${result.error ?? 'directory transfer failed'}`);
+            opts.onEvent({ type: 'file-error', item: it, error: result.error ?? 'failed' });
+          }
         }
       }
+
+      const summary = summarize(opts, {
+        filesTransferred,
+        filesFailed,
+        bytesTransferred,
+        start,
+        errors,
+      });
+      opts.onEvent({ type: 'all-done', summary });
+      return summary;
     }
 
-    const summary = summarize(opts, {
-      filesTransferred,
-      filesFailed,
-      bytesTransferred,
-      start,
-      errors,
-    });
-    opts.onEvent({ type: 'all-done', summary });
-    return summary;
+    throw new TransferError(`Unknown transport: ${opts.transport}`);
+  } finally {
+    // Tear down the multiplexing master so no background ssh lingers. No-op when
+    // the transfer never spawned ssh (pure sftp via ssh2).
+    if (opts.transport !== 'sftp') await closeSshMaster(opts.conn);
   }
-
-  throw new TransferError(`Unknown transport: ${opts.transport}`);
 }
 
 // Emit file-done for a directory item. Directories have no single checksum, so
