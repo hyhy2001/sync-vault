@@ -47,7 +47,9 @@ export function ConnectScreen({
   onConfigChanged,
 }: ConnectScreenProps) {
   const hasSaved = (config?.connections.length ?? 0) > 0;
-  const [mode, setMode] = useState<Mode>(hasSaved ? 'pick' : 'manual');
+  // The picker is the hub: it's always the entry point, even with no saved
+  // connections, so add/delete/choose are always discoverable.
+  const [mode, setMode] = useState<Mode>('pick');
   const [error, setError] = useState<string | null>(null);
   // The connection that just connected, held while we offer to save it.
   const [pending, setPending] = useState<{ session: SshSession; conn: ConnectionConfig } | null>(
@@ -103,11 +105,12 @@ export function ConnectScreen({
   useInput((input, key) => {
     if (mode === 'manual') {
       if (key.tab) setFocusIndex((i) => (i + 1) % FIELDS.length);
+      else if (key.escape) setMode('pick');
       return;
     }
     if (mode === 'pick') {
-      if (input === 'm' || input === 'M') setMode('manual');
-      else if ((input === 'd' || input === 'D') && highlighted && configPath) {
+      if (input === 'a' || input === 'A' || input === 'm' || input === 'M') setMode('manual');
+      else if ((input === 'd' || input === 'D') && hasSaved && highlighted && configPath) {
         setMode('confirm-delete');
       }
       return;
@@ -202,35 +205,44 @@ export function ConnectScreen({
     );
   }
 
-  if (mode === 'pick' && config && config.connections.length > 0) {
-    const items = config.connections.map((c) => ({
-      key: c.name,
-      label: `${c.name}  (${c.username}@${c.host}:${c.port})`,
-      value: c.name,
-    }));
+  if (mode === 'pick') {
+    const hints = hasSaved
+      ? [
+          { key: '↑↓', desc: 'navigate' },
+          { key: '⏎', desc: 'connect' },
+          { key: 'a', desc: 'add new' },
+          { key: 'd', desc: 'delete' },
+          { key: 'Ctrl+C', desc: 'quit' },
+        ]
+      : [
+          { key: 'a', desc: 'add a connection' },
+          { key: 'Ctrl+C', desc: 'quit' },
+        ];
     return (
       <Box flexDirection="column">
-        <Text bold>Select a saved connection</Text>
+        <Text bold>Saved connections</Text>
         {error ? <Text color="red">Error: {error}</Text> : null}
-        <Box marginTop={1}>
-          <SelectInput
-            items={items}
-            onHighlight={(item) => setHighlighted(item.value)}
-            onSelect={(item) => {
-              const conn = config.connections.find((c) => c.name === item.value);
-              if (conn) void doConnect(conn, false);
-            }}
-          />
-        </Box>
-        <StatusBar
-          hints={[
-            { key: '↑↓', desc: 'navigate' },
-            { key: '⏎', desc: 'connect' },
-            { key: 'd', desc: 'delete' },
-            { key: 'm', desc: 'manual entry' },
-            { key: 'Ctrl+C', desc: 'quit' },
-          ]}
-        />
+        {hasSaved && config ? (
+          <Box marginTop={1}>
+            <SelectInput
+              items={config.connections.map((c) => ({
+                key: c.name,
+                label: `${c.name}  (${c.username}@${c.host}:${c.port})`,
+                value: c.name,
+              }))}
+              onHighlight={(item) => setHighlighted(item.value)}
+              onSelect={(item) => {
+                const conn = config.connections.find((c) => c.name === item.value);
+                if (conn) void doConnect(conn, false);
+              }}
+            />
+          </Box>
+        ) : (
+          <Box marginTop={1}>
+            <Text dimColor>No saved connections yet — press "a" to add one.</Text>
+          </Box>
+        )}
+        <StatusBar hints={hints} />
       </Box>
     );
   }
