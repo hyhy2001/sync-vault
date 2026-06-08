@@ -5,7 +5,6 @@ import type { ConnectionConfig } from '../types';
 import { switchConnectionToKey } from './config';
 import type { SshSession } from './connection';
 import { ConnectionError } from './errors';
-import { shellQuote } from './shell';
 
 // Candidate local public keys, in preference order. Mirrors ssh's own default
 // key search. We do NOT generate keys — the user runs ssh-keygen first, exactly
@@ -57,10 +56,14 @@ export async function installPublicKey(
   session: SshSession,
   publicKey: string,
 ): Promise<{ alreadyPresent: boolean }> {
-  const keyQ = shellQuote(publicKey);
-  // Build a single remote shell command. `grep -qF` checks for an exact fixed
-  // string match; only append when absent. All key text is single-quoted.
-  const cmd = `umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && if grep -qF ${keyQ} ~/.ssh/authorized_keys; then echo SV_KEY_PRESENT; else printf '%s\\n' ${keyQ} >> ~/.ssh/authorized_keys && echo SV_KEY_ADDED; fi && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys`;
+  // The remote login shell may be csh/tcsh, which can't parse POSIX `if/fi`.
+  // Run the script under `sh -c` so the syntax is guaranteed POSIX, and pass the
+  // key base64-encoded so no shell metacharacter from it ever reaches the shell
+  // (encoded form is [A-Za-z0-9+/=] only). The inner script contains no single
+  // quotes, so wrapping it in single quotes is safe in any login shell.
+  const b64 = Buffer.from(publicKey, 'utf8').toString('base64');
+  const inner = `umask 077 && mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && K=$(printf %s ${b64} | base64 -d) && if grep -qF "$K" ~/.ssh/authorized_keys; then echo SV_KEY_PRESENT; else echo "$K" >> ~/.ssh/authorized_keys && echo SV_KEY_ADDED; fi && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys`;
+  const cmd = `sh -c '${inner}'`;
 
   const { code, stdout, stderr } = await session.exec(cmd);
   if (code !== 0) {
