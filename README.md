@@ -71,9 +71,9 @@ You configure your hosts once, then just pick one and transfer. Two ways to auth
 ```bash
 ./sync-vault
 ```
-You'll get a picker of your saved hosts. Pick one, and you go straight into the file browser.
+You'll get a picker of your saved hosts. Pick one with `Enter`, or press `d` to delete a saved host, or `m` to enter a new one manually. After a manual connection succeeds, sync-vault offers to **save it** so you don't have to retype it next time (no need to hand-edit the config).
 
-**4. Transfer:** in the two-pane browser, navigate with arrows, `Tab` to switch local⇆remote pane, `Space` to select files/folders, `g` to go. Confirm the direction (upload/download), then watch the live speed and ETA. A summary shows at the end.
+**4. Transfer:** in the two-pane browser, navigate with arrows, `Tab` to switch local⇆remote pane, `Space` to select files/folders, `g` to go. Press `/` to **jump to a path**: type a path, press `Tab` to list/complete subdirectories (use `↑↓` to pick), `Enter` to jump there. Confirm the direction (upload/download), then watch the live speed and ETA. A summary shows at the end.
 
 ### Config fields explained
 

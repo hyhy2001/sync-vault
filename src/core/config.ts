@@ -2,7 +2,7 @@ import { readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { z } from 'zod';
-import type { AppConfig } from '../types';
+import type { AppConfig, ConnectionConfig } from '../types';
 import { ConfigError } from './errors';
 
 // Base dir for config/audit/state. The user has no root and a quota-limited
@@ -49,7 +49,7 @@ const compressionSchema = z
   .default('auto');
 
 const appConfigSchema = z.object({
-  connections: z.array(connectionSchema).min(1),
+  connections: z.array(connectionSchema),
   transport: z.object({
     preferenceOrder: z.array(transportKindSchema).min(1),
     compression: compressionSchema,
@@ -127,16 +127,13 @@ export async function loadConfig(path: string): Promise<AppConfig> {
   return config;
 }
 
-// Update a single connection in the on-disk config and switch it to key auth:
-// set privateKeyPath and DROP the plaintext password. We edit the RAW JSON
-// (not the path-resolved in-memory AppConfig) so we never persist expanded `~/`
-// or absolute audit paths back over the user's tidy relative values. Writes
-// atomically (tmp + rename) and preserves 0600 perms. Used after ssh-copy-id.
-export async function switchConnectionToKey(
-  configPath: string,
-  connName: string,
-  privateKeyPath: string,
-): Promise<void> {
+type RawConnection = Record<string, unknown>;
+type RawConfig = { connections: RawConnection[] };
+
+// Read + JSON-parse + validate the on-disk config. We mutate the RAW JSON (not
+// the path-resolved in-memory AppConfig) so writers never persist expanded `~/`
+// or absolute audit paths back over the user's tidy relative values.
+async function readRawConfig(configPath: string): Promise<{ abs: string; data: RawConfig }> {
   const abs = isAbsolute(configPath) ? configPath : resolve(process.cwd(), configPath);
 
   let raw: string;
@@ -154,21 +151,15 @@ export async function switchConnectionToKey(
   }
 
   // Validate before mutating so we never write a structurally broken file.
-  const result = appConfigSchema.safeParse(parsed);
-  if (!result.success) {
+  if (!appConfigSchema.safeParse(parsed).success) {
     throw new ConfigError(`Refusing to write: existing config at ${abs} is invalid`);
   }
+  return { abs, data: parsed as RawConfig };
+}
 
-  const data = parsed as { connections: Array<Record<string, unknown>> };
-  const target = data.connections.find((c) => c.name === connName);
-  if (!target) {
-    throw new ConfigError(`No connection named "${connName}" in ${abs}`);
-  }
-  target.privateKeyPath = privateKeyPath;
-  // Drop the plaintext password — the whole point of installing the key.
-  // JSON.stringify omits undefined keys, so this removes it from the file.
-  target.password = undefined;
-
+// Atomic write (tmp + rename) with 0600 perms — the config may hold a plaintext
+// password.
+async function writeRawConfig(abs: string, data: RawConfig): Promise<void> {
   const tmp = `${abs}.tmp-${process.pid}`;
   try {
     await writeFile(tmp, `${JSON.stringify(data, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
@@ -176,4 +167,53 @@ export async function switchConnectionToKey(
   } catch (cause) {
     throw new ConfigError(`Failed to write config at ${abs}`, { cause });
   }
+}
+
+// Switch a connection to key auth: set privateKeyPath and DROP the plaintext
+// password. Used after ssh-copy-id.
+export async function switchConnectionToKey(
+  configPath: string,
+  connName: string,
+  privateKeyPath: string,
+): Promise<void> {
+  const { abs, data } = await readRawConfig(configPath);
+  const target = data.connections.find((c) => c.name === connName);
+  if (!target) {
+    throw new ConfigError(`No connection named "${connName}" in ${abs}`);
+  }
+  target.privateKeyPath = privateKeyPath;
+  // JSON.stringify omits undefined keys, so this removes it from the file.
+  target.password = undefined;
+  await writeRawConfig(abs, data);
+}
+
+// Insert or replace a connection (matched by name). Used to persist a
+// manually-entered connection so the user need not re-type it next time.
+export async function saveConnection(configPath: string, conn: ConnectionConfig): Promise<void> {
+  const { abs, data } = await readRawConfig(configPath);
+  const entry: RawConnection = {
+    name: conn.name,
+    host: conn.host,
+    port: conn.port,
+    username: conn.username,
+    remoteBasePath: conn.remoteBasePath,
+  };
+  if (conn.privateKeyPath) entry.privateKeyPath = conn.privateKeyPath;
+  if (conn.password) entry.password = conn.password;
+
+  const idx = data.connections.findIndex((c) => c.name === conn.name);
+  if (idx >= 0) data.connections[idx] = entry;
+  else data.connections.push(entry);
+  await writeRawConfig(abs, data);
+}
+
+// Remove a saved connection by name.
+export async function deleteConnection(configPath: string, connName: string): Promise<void> {
+  const { abs, data } = await readRawConfig(configPath);
+  const idx = data.connections.findIndex((c) => c.name === connName);
+  if (idx < 0) {
+    throw new ConfigError(`No connection named "${connName}" in ${abs}`);
+  }
+  data.connections.splice(idx, 1);
+  await writeRawConfig(abs, data);
 }

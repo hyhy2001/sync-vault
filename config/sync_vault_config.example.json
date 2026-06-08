@@ -1,14 +1,5 @@
 {
-  "connections": [
-    {
-      "name": "prod-storage",
-      "host": "storage01.internal",
-      "port": 22,
-      "username": "svc-sync",
-      "privateKeyPath": "~/.ssh/id_ed25519",
-      "remoteBasePath": "/data/vault"
-    }
-  ],
+  "connections": [],
   "transport": {
     "preferenceOrder": ["rsync", "scp", "sftp"],
     "compression": "auto",

@@ -1,6 +1,7 @@
 import { basename, dirname, join, posix } from 'node:path';
 import { Box, Text, useInput } from 'ink';
-import { useEffect, useState } from 'react';
+import TextInput from 'ink-text-input';
+import { useEffect, useRef, useState } from 'react';
 import type { SshSession } from '../../core/connection';
 import { listLocal, listRemote } from '../../core/walker';
 import type { ConnectionConfig, FileEntry, TransferDirection, TransferItem } from '../../types';
@@ -23,6 +24,15 @@ interface PaneState {
   loading: boolean;
 }
 
+// State for the "jump to path" bar. null when the bar is closed.
+interface PathBar {
+  value: string;
+  matches: FileEntry[]; // directories under the typed dir, filtered by prefix
+  cursor: number;
+  listedDir: string | null; // which dir `matches` came from (for display)
+  error: string | null;
+}
+
 const emptyPane = (cwd: string): PaneState => ({
   cwd,
   entries: [],
@@ -31,6 +41,8 @@ const emptyPane = (cwd: string): PaneState => ({
   loading: true,
 });
 
+const MATCH_WINDOW = 10;
+
 export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
   const [active, setActive] = useState<Pane>('local');
   const [local, setLocal] = useState<PaneState>(() => emptyPane(process.cwd()));
@@ -38,6 +50,11 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
   // Selection is kept per pane so source/dest never mix across sides.
   const [selectedLocal, setSelectedLocal] = useState<Set<string>>(new Set());
   const [selectedRemote, setSelectedRemote] = useState<Set<string>>(new Set());
+  const [pathBar, setPathBar] = useState<PathBar | null>(null);
+
+  // Cache directory listings so path-bar completion doesn't re-list (and, for
+  // remote, doesn't make an SSH round-trip) on every keystroke. Keyed `pane:dir`.
+  const listCache = useRef<Map<string, FileEntry[]>>(new Map());
 
   // Load a directory listing for a pane; errors surface inline rather than crash.
   async function loadLocal(dir: string): Promise<void> {
@@ -95,6 +112,77 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
     else void loadRemote(parent);
   }
 
+  // ---- jump-to-path -------------------------------------------------------
+
+  async function listDirCached(pane: Pane, dir: string): Promise<FileEntry[]> {
+    const key = `${pane}:${dir}`;
+    const hit = listCache.current.get(key);
+    if (hit) return hit;
+    const entries = pane === 'local' ? await listLocal(dir) : await listRemote(session, dir);
+    listCache.current.set(key, entries);
+    return entries;
+  }
+
+  // Split a typed path into the directory to list and the prefix to match. A
+  // trailing slash means "list this dir, no prefix"; otherwise the last segment
+  // is the prefix being completed.
+  function splitPath(value: string): { dir: string; prefix: string } {
+    const dn = active === 'local' ? dirname : posix.dirname;
+    const bn = active === 'local' ? basename : posix.basename;
+    if (value.endsWith('/')) {
+      const trimmed = value.replace(/\/+$/, '');
+      return { dir: trimmed || '/', prefix: '' };
+    }
+    return { dir: dn(value) || '/', prefix: bn(value) };
+  }
+
+  async function refreshMatches(value: string): Promise<void> {
+    const { dir, prefix } = splitPath(value);
+    try {
+      const entries = await listDirCached(active, dir);
+      const lower = prefix.toLowerCase();
+      const matches = entries.filter(
+        (e) => e.isDirectory && e.name.toLowerCase().startsWith(lower),
+      );
+      setPathBar((pb) => (pb ? { ...pb, matches, cursor: 0, listedDir: dir, error: null } : pb));
+    } catch (err) {
+      setPathBar((pb) =>
+        pb
+          ? {
+              ...pb,
+              matches: [],
+              cursor: 0,
+              listedDir: dir,
+              error: err instanceof Error ? err.message : String(err),
+            }
+          : pb,
+      );
+    }
+  }
+
+  function openPathBar(): void {
+    const initial = state.cwd.endsWith('/') ? state.cwd : `${state.cwd}/`;
+    setPathBar({ value: initial, matches: [], cursor: 0, listedDir: null, error: null });
+    void refreshMatches(initial);
+  }
+
+  // Fill the highlighted match into the bar and drill into it (show its dirs).
+  function autofill(): void {
+    if (!pathBar) return;
+    const match = pathBar.matches[pathBar.cursor];
+    if (!match) return;
+    const next = match.path.endsWith('/') ? match.path : `${match.path}/`;
+    setPathBar((pb) => (pb ? { ...pb, value: next } : pb));
+    void refreshMatches(next);
+  }
+
+  function jumpTo(value: string): void {
+    const dir = value.length > 1 ? value.replace(/\/+$/, '') : value;
+    setPathBar(null);
+    if (active === 'local') void loadLocal(dir || '/');
+    else void loadRemote(dir || '/');
+  }
+
   // Resolve selected entries into TransferItems. The active pane is the source;
   // the OTHER pane's cwd is the destination base. Local source => upload,
   // remote source => download. destPath = <otherCwd>/<basename(source)>.
@@ -115,8 +203,28 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
   }
 
   useInput((input, key) => {
+    // Path-bar mode: only navigation keys act here; typed chars go to TextInput,
+    // and Enter is handled by its onSubmit.
+    if (pathBar) {
+      if (key.tab) autofill();
+      else if (key.upArrow) {
+        setPathBar((pb) => (pb ? { ...pb, cursor: Math.max(0, pb.cursor - 1) } : pb));
+      } else if (key.downArrow) {
+        setPathBar((pb) =>
+          pb ? { ...pb, cursor: Math.min(pb.matches.length - 1, pb.cursor + 1) } : pb,
+        );
+      } else if (key.escape) {
+        setPathBar(null);
+      }
+      return;
+    }
+
     if (key.tab) {
       setActive((a) => (a === 'local' ? 'remote' : 'local'));
+      return;
+    }
+    if (input === '/') {
+      openPathBar();
       return;
     }
     if (key.upArrow) {
@@ -209,20 +317,92 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
           )}
         </Box>
       </Box>
-      <Text>
-        Selected: <Text color="green">{totalSelected}</Text> file(s)
-      </Text>
+
+      {pathBar ? (
+        <PathBarView
+          pane={active}
+          bar={pathBar}
+          onChange={(v) => {
+            setPathBar((pb) => (pb ? { ...pb, value: v } : pb));
+            void refreshMatches(v);
+          }}
+          onSubmit={jumpTo}
+        />
+      ) : (
+        <Text>
+          Selected: <Text color="green">{totalSelected}</Text> file(s)
+        </Text>
+      )}
+
       <StatusBar
-        hints={[
-          { key: 'Tab', desc: 'switch pane' },
-          { key: '↑↓', desc: 'move' },
-          { key: '⏎', desc: 'open dir' },
-          { key: 'u', desc: 'up dir' },
-          { key: 'Space', desc: 'select' },
-          { key: 'g', desc: 'go' },
-          { key: 'Ctrl+C', desc: 'quit' },
-        ]}
+        hints={
+          pathBar
+            ? [
+                { key: '↑↓', desc: 'pick dir' },
+                { key: 'Tab', desc: 'fill dir' },
+                { key: '⏎', desc: 'go' },
+                { key: 'Esc', desc: 'cancel' },
+              ]
+            : [
+                { key: 'Tab', desc: 'switch pane' },
+                { key: '↑↓', desc: 'move' },
+                { key: '⏎', desc: 'open dir' },
+                { key: 'u', desc: 'up dir' },
+                { key: 'Space', desc: 'select' },
+                { key: '/', desc: 'go to path' },
+                { key: 'g', desc: 'go' },
+                { key: 'Ctrl+C', desc: 'quit' },
+              ]
+        }
       />
+    </Box>
+  );
+}
+
+interface PathBarViewProps {
+  pane: Pane;
+  bar: PathBar;
+  onChange: (value: string) => void;
+  onSubmit: (value: string) => void;
+}
+
+function PathBarView({ pane, bar, onChange, onSubmit }: PathBarViewProps) {
+  // Window the matches around the cursor so a directory with thousands of
+  // subdirectories renders a fixed number of rows, with a count to show there's
+  // more. Type more of the name to narrow the list.
+  const total = bar.matches.length;
+  const start = Math.min(
+    Math.max(0, bar.cursor - Math.floor(MATCH_WINDOW / 2)),
+    Math.max(0, total - MATCH_WINDOW),
+  );
+  const visible = bar.matches.slice(start, start + MATCH_WINDOW);
+
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
+      <Box>
+        <Text color="cyan">Go to ({pane}): </Text>
+        <TextInput value={bar.value} onChange={onChange} onSubmit={onSubmit} />
+      </Box>
+      {bar.error ? (
+        <Text color="red">⚠ {bar.error}</Text>
+      ) : total === 0 ? (
+        <Text dimColor>(no matching directories)</Text>
+      ) : (
+        <Box flexDirection="column">
+          {visible.map((entry, i) => {
+            const index = start + i;
+            return (
+              <Text key={entry.path} inverse={index === bar.cursor} color="blue">
+                {entry.name}/
+              </Text>
+            );
+          })}
+          <Text dimColor>
+            {total} dir{total === 1 ? '' : 's'}
+            {total > MATCH_WINDOW ? ` — showing ${start + 1}-${start + visible.length}` : ''}
+          </Text>
+        </Box>
+      )}
     </Box>
   );
 }

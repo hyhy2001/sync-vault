@@ -145,10 +145,11 @@ describe('loadConfig', () => {
     expect(loadConfig(p)).rejects.toThrow(ConfigError);
   });
 
-  test('rejects an empty connections array with ConfigError', async () => {
+  test('accepts an empty connections array', async () => {
     const cfg = validConfig({ connections: [] });
     const p = await writeConfig('no-conns.json', JSON.stringify(cfg));
-    expect(loadConfig(p)).rejects.toThrow(ConfigError);
+    const loaded = await loadConfig(p);
+    expect(loaded.connections).toEqual([]);
   });
 
   test('throws ConfigError on malformed JSON', async () => {

@@ -116,14 +116,26 @@ export function App({ configPathOverride }: AppProps) {
       <Box flexDirection="column">
         <Text color="red">Config error: {configError}</Text>
         <Text dimColor>Continuing without a saved config — enter connection details manually.</Text>
-        <ConnectScreen config={null} onConnected={handleConnected} />
+        <ConnectScreen
+          config={null}
+          configPath={configPath}
+          onConnected={handleConnected}
+          onConfigChanged={setConfig}
+        />
       </Box>
     );
   }
 
   switch (phase) {
     case 'connect':
-      return <ConnectScreen config={config} onConnected={handleConnected} />;
+      return (
+        <ConnectScreen
+          config={config}
+          configPath={configPath}
+          onConnected={handleConnected}
+          onConfigChanged={setConfig}
+        />
+      );
     case 'keysetup':
       return session && conn ? (
         <KeySetupScreen
