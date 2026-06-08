@@ -22,9 +22,38 @@ sync-vault doesn't reinvent file transfer — it orchestrates the standard SSH-f
 
 - **rsync** — the fastest option for most real workloads. It walks the tree and transfers files as a **single continuous stream**, so thousands of small files cost roughly one round-trip instead of one per file. Its headline feature is **delta transfer**: on a repeat sync it compares source and destination and sends only the changed blocks, so re-syncing a mostly-unchanged tree can be tens of times faster than copying it whole. It also supports `--partial` (resume interrupted transfers) and `-z` compression. Needs `rsync` installed on **both** ends.
 
+  ```bash
+  # file (upload)            # folder, recursive (the -a archive flag)
+  rsync -a file.txt user@host:/dest/
+  rsync -a mydir/ user@host:/dest/mydir/   # trailing slash = copy contents
+
+  # download a folder back, resuming if interrupted
+  rsync -a --partial user@host:/dest/mydir/ ./mydir/
+  ```
+
 - **scp** — simple and fast for a **first-time** copy of large files: like rsync it uses one continuous stream, so it saturates bandwidth well. But it has **no delta and no resume** — every run copies the whole file again, and an interrupted transfer starts over. Good when rsync isn't available and you're moving a few big files once.
 
+  ```bash
+  # file (upload)                    # folder needs -r (recursive)
+  scp file.txt user@host:/dest/
+  scp -r mydir user@host:/dest/
+
+  # download a file back
+  scp user@host:/dest/file.txt ./
+  ```
+
 - **sftp** — the universal fallback. It needs nothing beyond a working SSH server (no extra binary on either end), which is why it's the bottom of the preference order. The tradeoff is speed: classic SFTP transfers **file-by-file**, and each file is a separate open/write/close handshake, so on a directory of many small files the per-file round-trips dominate and it can be far slower than rsync. For a single large file the gap is small. sync-vault's SFTP path is pure-JS (via `ssh2`), so it works even when no command-line tools exist.
+
+  ```bash
+  # file (one-shot, non-interactive)
+  echo "put file.txt /dest/file.txt" | sftp user@host
+
+  # folder needs -r, inside an sftp session or a batch file
+  sftp user@host <<'EOF'
+  put -r mydir /dest/mydir
+  get -r /dest/otherdir ./otherdir
+  EOF
+  ```
 
 ### How sync-vault picks
 
