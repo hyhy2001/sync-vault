@@ -14,6 +14,31 @@ An interactive terminal UI for transferring files over SFTP/SSH — a friendlier
 - **Audit log** — append-only JSONL record of every transfer (who, what, when, bytes, result).
 - **Single binary** — compiles to one self-contained executable for RHEL8; no runtime to install on the target.
 
+## How transfers work
+
+sync-vault doesn't reinvent file transfer — it orchestrates the standard SSH-family tools and falls back gracefully when one isn't available. All three run the bytes over an encrypted SSH connection; they differ in *how* they move data, which is why speed varies so much by workload.
+
+### The native tools
+
+- **rsync** — the fastest option for most real workloads. It walks the tree and transfers files as a **single continuous stream**, so thousands of small files cost roughly one round-trip instead of one per file. Its headline feature is **delta transfer**: on a repeat sync it compares source and destination and sends only the changed blocks, so re-syncing a mostly-unchanged tree can be tens of times faster than copying it whole. It also supports `--partial` (resume interrupted transfers) and `-z` compression. Needs `rsync` installed on **both** ends.
+
+- **scp** — simple and fast for a **first-time** copy of large files: like rsync it uses one continuous stream, so it saturates bandwidth well. But it has **no delta and no resume** — every run copies the whole file again, and an interrupted transfer starts over. Good when rsync isn't available and you're moving a few big files once.
+
+- **sftp** — the universal fallback. It needs nothing beyond a working SSH server (no extra binary on either end), which is why it's the bottom of the preference order. The tradeoff is speed: classic SFTP transfers **file-by-file**, and each file is a separate open/write/close handshake, so on a directory of many small files the per-file round-trips dominate and it can be far slower than rsync. For a single large file the gap is small. sync-vault's SFTP path is pure-JS (via `ssh2`), so it works even when no command-line tools exist.
+
+### How sync-vault picks
+
+When you start a transfer, sync-vault **probes both the local machine and the remote server** to see which tools exist on each, then walks your `preferenceOrder` (default `rsync → scp → sftp`) and uses the first one viable on **both** ends. So you get rsync's speed when possible and silently degrade to scp, then SFTP, without having to think about it.
+
+A few things sync-vault adds on top of the raw tools:
+
+- **Folders without rsync** — if rsync is missing, sync-vault doesn't fall back to slow file-by-file SFTP for directories. Instead it streams the whole tree through a **tar-pipe** (`tar c | ssh 'tar x'`), turning thousands of files back into one stream — and only drops to recursive SFTP if `tar` is missing on either end.
+- **Batched multi-select** — selecting many loose files for an rsync transfer sends them through a **single** `rsync --files-from` invocation (one SSH handshake), not one process per file.
+- **Connection multiplexing** — the rsync/scp/ssh processes a run spawns share **one** SSH connection (ControlMaster), so they handshake once rather than per file.
+- **Smart compression** — `auto` mode samples the payload and skips compression for already-compressed data (mp4, zip, …) where it would only waste CPU, while using zstd/gzip for compressible data.
+
+The short version: **rsync for most things** (especially repeat syncs and many small files), **scp for a one-off big file**, **SFTP as the always-works fallback** — and sync-vault chooses for you while smoothing over the rough edges of each.
+
 ## Requirements
 
 - **To run the binary:** Linux x86_64 with glibc 2.28+ (RHEL8 qualifies). SSH access to the remote host. `rsync`/`scp` optional — used automatically if present on both ends; otherwise SFTP is used.
