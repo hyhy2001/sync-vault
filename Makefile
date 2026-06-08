@@ -9,7 +9,12 @@ PREFIX ?= $(CURDIR)/sync-vault
 TARGET ?= bun-linux-x64
 BIN    := dist/sync-vault
 
-.PHONY: help deps build install all check test typecheck lint clean
+# Bun installs LOCALLY into the project (no root, no system-wide) so a fresh
+# machine can bootstrap itself. A system `bun` on PATH still takes precedence.
+BUN_LOCAL := $(CURDIR)/.bun
+export PATH := $(BUN_LOCAL)/bin:$(PATH)
+
+.PHONY: help bun deps build install all check test typecheck lint clean
 
 help: ## Show this help
 	@echo "sync-vault — local build & install"
@@ -20,7 +25,16 @@ help: ## Show this help
 	@echo
 	@echo "Install location (PREFIX): $(PREFIX)"
 
-deps: ## Install dependencies with bun
+bun: ## Install Bun locally into ./.bun if not already on PATH
+	@if command -v bun >/dev/null 2>&1; then \
+		echo "bun already available: $$(command -v bun)"; \
+	else \
+		echo "Installing Bun locally into $(BUN_LOCAL)…"; \
+		curl -fsSL https://bun.sh/install | BUN_INSTALL="$(BUN_LOCAL)" bash; \
+		echo "Bun installed: $(BUN_LOCAL)/bin/bun"; \
+	fi
+
+deps: bun ## Install dependencies with bun
 	bun install
 
 build: deps ## Build the single self-contained binary into dist/

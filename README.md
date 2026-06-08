@@ -17,7 +17,7 @@ An interactive terminal UI for transferring files over SFTP/SSH — a friendlier
 ## Requirements
 
 - **To run the binary:** Linux x86_64 with glibc 2.28+ (RHEL8 qualifies). SSH access to the remote host. `rsync`/`scp` optional — used automatically if present on both ends; otherwise SFTP is used.
-- **To build / develop:** [Bun](https://bun.sh) 1.1+.
+- **To build / develop:** [Bun](https://bun.sh) 1.1+. If it's missing, `make` installs it locally into `./.bun` for you (no root needed).
 
 ## Install
 
@@ -64,6 +64,8 @@ You configure your hosts once, then just pick one and transfer. Two ways to auth
 - *Password.* No setup needed, but see the security note below — the password is stored in plaintext in your config. For password-based rsync/scp speed, the machine running sync-vault needs `sshpass` installed; without it, password transfers automatically use the (slower) built-in SFTP.
 
 **2. Edit your config** (`sync_vault_config.json`, next to the binary). Add one entry per host under `connections`. Minimum fields: `host`, `username`, `remoteBasePath`, and either `privateKeyPath` or `password`.
+
+> Not sure of the server's address? Log in to the remote server and run `hostname -I` there — the first address it prints is what goes in `host`.
 
 **3. Run it:**
 ```bash
