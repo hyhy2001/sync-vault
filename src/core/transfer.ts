@@ -10,7 +10,6 @@ import type {
   TransferDirection,
   TransferEvent,
   TransferItem,
-  TransferProgress,
   TransferSummary,
   TransportKind,
 } from '../types';
@@ -146,6 +145,7 @@ async function runRsync(opts: RunTransferOptions, totals: FileTotals): Promise<T
   let filesTransferred = 0;
   let filesFailed = 0;
   let bytesTransferred = 0;
+  let doneCount = 0;
 
   const baseArgs = ['-a', '--partial', '--info=progress2'];
   if (decision.compress) {
@@ -157,68 +157,80 @@ async function runRsync(opts: RunTransferOptions, totals: FileTotals): Promise<T
   }
   baseArgs.push('-e', buildSshTransportArg(conn));
 
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i];
-    if (!item) continue;
-    onEvent({ type: 'file-start', item, index: i, total: items.length });
+  // Run one rsync child, parsing --info=progress2 (cumulative across the whole
+  // invocation) into progress events. `stdinData` feeds a --files-from list.
+  const runChild = (
+    cmdArgs: string[],
+    stdinData: string | null,
+    label: string,
+    unitTotalBytes: number,
+  ): Promise<void> =>
+    new Promise((res, rej) => {
+      const [cmd, args] = wrapSshpass(conn, 'rsync', cmdArgs);
+      const child = spawn(cmd, args, { env: sshpassEnv(conn) });
+      let stderr = '';
+      let buf = '';
+      const meter = new SpeedMeter();
 
-    // rsync trailing-slash rule: `src/` means "contents of src", `src` (no slash)
-    // means "the src dir itself". To land a selected folder at `dest/<name>` we
-    // pass the source WITHOUT a trailing slash and target the PARENT dir of
-    // item.destPath (item.destPath is already `<destCwd>/<basename>`), so e.g.
-    // `rsync -a /a/b/myfolder user@host:/dest/` creates `/dest/myfolder`. Files
-    // keep their current direct src->dest mapping.
-    const srcPath = item.sourcePath;
-    const destPath = item.isDirectory ? dirname(item.destPath) : item.destPath;
-    const src = direction === 'upload' ? srcPath : remoteEndpoint(conn, srcPath);
-    const dest = direction === 'upload' ? remoteEndpoint(conn, destPath) : destPath;
-
-    try {
-      await new Promise<void>((res, rej) => {
-        const [cmd, cmdArgs] = wrapSshpass(conn, 'rsync', [...baseArgs, src, dest]);
-        const child = spawn(cmd, cmdArgs, { env: sshpassEnv(conn) });
-        let stderr = '';
-        let buf = '';
-        const meter = new SpeedMeter();
-
-        child.stdout.on('data', (d: Buffer) => {
-          buf += d.toString('utf8');
-          // rsync uses \r to overwrite the progress line.
-          const lines = buf.split(/[\r\n]/);
-          buf = lines.pop() ?? '';
-          for (const line of lines) {
-            const m = line.match(RSYNC_PROGRESS_RE);
-            if (!m || !m[1] || !m[3]) continue;
-            const fileBytes = Number(m[1].replace(/,/g, ''));
-            const bps = parseRsyncSpeed(Number(m[3]), m[4] ?? '');
-            meter.push(fileBytes);
-            const fileTotal = item.size || fileBytes;
-            const progress: TransferProgress = {
-              currentFile: basename(item.sourcePath),
-              fileIndex: i,
+      child.stdout.on('data', (d: Buffer) => {
+        buf += d.toString('utf8');
+        // rsync uses \r to overwrite the progress line.
+        const lines = buf.split(/[\r\n]/);
+        buf = lines.pop() ?? '';
+        for (const line of lines) {
+          const m = line.match(RSYNC_PROGRESS_RE);
+          if (!m || !m[1] || !m[3]) continue;
+          const cumBytes = Number(m[1].replace(/,/g, ''));
+          const bps = parseRsyncSpeed(Number(m[3]), m[4] ?? '');
+          meter.push(cumBytes);
+          const total = unitTotalBytes || cumBytes;
+          onEvent({
+            type: 'progress',
+            progress: {
+              currentFile: label,
+              fileIndex: doneCount,
               totalFiles: items.length,
-              fileBytesTransferred: fileBytes,
-              fileBytesTotal: fileTotal,
-              totalBytesTransferred: totals.totalBytesTransferred + fileBytes,
+              fileBytesTransferred: cumBytes,
+              fileBytesTotal: total,
+              totalBytesTransferred: totals.totalBytesTransferred + cumBytes,
               totalBytesTotal: totals.totalBytesTotal,
               bytesPerSecond: bps || meter.bytesPerSecond(),
-              etaSeconds: etaFrom(fileTotal - fileBytes, bps || meter.bytesPerSecond()),
-            };
-            onEvent({ type: 'progress', progress });
-          }
-        });
-        child.stderr.on('data', (d: Buffer) => {
-          stderr += d.toString('utf8');
-        });
-        child.on('error', (err) =>
-          rej(new TransferError(`rsync spawn failed: ${err.message}`, { cause: err })),
-        );
-        child.on('close', (code) => {
-          if (code === 0) res();
-          else rej(new TransferError(`rsync exited ${code}: ${stderr.trim()}`));
-        });
+              etaSeconds: etaFrom(total - cumBytes, bps || meter.bytesPerSecond()),
+            },
+          });
+        }
       });
+      child.stderr.on('data', (d: Buffer) => {
+        stderr += d.toString('utf8');
+      });
+      child.on('error', (err) =>
+        rej(new TransferError(`rsync spawn failed: ${err.message}`, { cause: err })),
+      );
+      child.on('close', (code) => {
+        if (code === 0) res();
+        else rej(new TransferError(`rsync exited ${code}: ${stderr.trim()}`));
+      });
+      if (stdinData !== null) {
+        child.stdin.write(stdinData);
+        child.stdin.end();
+      }
+    });
 
+  // Directories get one rsync each (it recurses via -a). Plain files are grouped
+  // by shared (source parent, dest parent) and sent through a SINGLE rsync via
+  // --files-from, so selecting N files costs ONE ssh handshake instead of N.
+  const dirItems = items.filter((it) => it.isDirectory);
+  const fileItems = items.filter((it) => !it.isDirectory);
+
+  for (const item of dirItems) {
+    onEvent({ type: 'file-start', item, index: doneCount, total: items.length });
+    // Target the PARENT of destPath (already `<destCwd>/<basename>`) with the
+    // source given WITHOUT a trailing slash, so the folder lands at dest/<name>.
+    const destParent = dirname(item.destPath);
+    const src = direction === 'upload' ? item.sourcePath : remoteEndpoint(conn, item.sourcePath);
+    const dest = direction === 'upload' ? remoteEndpoint(conn, destParent) : destParent;
+    try {
+      await runChild([...baseArgs, src, dest], null, basename(item.sourcePath), item.size);
       const checksumOk = await maybeVerify(opts, item);
       if (checksumOk === false) {
         filesFailed++;
@@ -236,6 +248,60 @@ async function runRsync(opts: RunTransferOptions, totals: FileTotals): Promise<T
       errors.push(`${item.sourcePath}: ${msg}`);
       onEvent({ type: 'file-error', item, error: msg });
     }
+    doneCount++;
+  }
+
+  // Group files by (source parent, dest parent). --files-from entries are plain
+  // basenames resolved against the source base, landing under the dest base.
+  const groups = new Map<string, TransferItem[]>();
+  for (const item of fileItems) {
+    const key = `${dirname(item.sourcePath)} ${dirname(item.destPath)}`;
+    const arr = groups.get(key);
+    if (arr) arr.push(item);
+    else groups.set(key, [item]);
+  }
+
+  for (const group of groups.values()) {
+    const first = group[0];
+    if (!first) continue;
+    const srcBase = dirname(first.sourcePath);
+    const destBase = dirname(first.destPath);
+    const src = direction === 'upload' ? srcBase : remoteEndpoint(conn, srcBase);
+    const dest = direction === 'upload' ? remoteEndpoint(conn, destBase) : destBase;
+    const list = `${group.map((it) => basename(it.sourcePath)).join('\n')}\n`;
+    const groupBytes = group.reduce((s, it) => s + it.size, 0);
+    const label = group.length === 1 ? basename(first.sourcePath) : `${group.length} files`;
+
+    for (let i = 0; i < group.length; i++) {
+      const it = group[i];
+      if (it) onEvent({ type: 'file-start', item: it, index: doneCount + i, total: items.length });
+    }
+
+    try {
+      await runChild([...baseArgs, '--files-from=-', src, dest], list, label, groupBytes);
+      // rsync moved the whole group; verify + report each file individually.
+      for (const it of group) {
+        const checksumOk = await maybeVerify(opts, it);
+        if (checksumOk === false) {
+          filesFailed++;
+          errors.push(`Checksum mismatch: ${it.sourcePath}`);
+          onEvent({ type: 'file-error', item: it, error: 'checksum mismatch' });
+        } else {
+          filesTransferred++;
+          bytesTransferred += it.size;
+          onEvent({ type: 'file-done', item: it, checksumOk });
+        }
+      }
+      totals.totalBytesTransferred += groupBytes;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      for (const it of group) {
+        filesFailed++;
+        errors.push(`${it.sourcePath}: ${msg}`);
+        onEvent({ type: 'file-error', item: it, error: msg });
+      }
+    }
+    doneCount += group.length;
   }
 
   return summarize(opts, { filesTransferred, filesFailed, bytesTransferred, start, errors });
