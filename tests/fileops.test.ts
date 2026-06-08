@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { deleteLocal, mkdirLocal, renameLocal } from '../src/core/fileops';
+import { copyLocal, deleteLocal, mkdirLocal, renameLocal } from '../src/core/fileops';
 
 describe('local fileops', () => {
   let root: string;
@@ -51,5 +51,24 @@ describe('local fileops', () => {
   test('deleteLocal does not throw on a missing path', async () => {
     await deleteLocal(join(root, 'never-existed'));
     expect(existsSync(join(root, 'never-existed'))).toBe(false);
+  });
+
+  test('copyLocal duplicates a file beside itself, leaving the original', async () => {
+    const src = join(root, 'orig.txt');
+    writeFileSync(src, 'body\n');
+    await copyLocal(src, 'copy.txt');
+    expect(readFileSync(src, 'utf8')).toBe('body\n');
+    expect(readFileSync(join(root, 'copy.txt'), 'utf8')).toBe('body\n');
+  });
+
+  test('copyLocal recursively duplicates a directory tree', async () => {
+    const tree = join(root, 'tree');
+    mkdirSync(join(tree, 'sub'), { recursive: true });
+    writeFileSync(join(tree, 'a.txt'), 'A');
+    writeFileSync(join(tree, 'sub', 'b.txt'), 'B');
+    await copyLocal(tree, 'tree-copy');
+    expect(readFileSync(join(root, 'tree-copy', 'a.txt'), 'utf8')).toBe('A');
+    expect(readFileSync(join(root, 'tree-copy', 'sub', 'b.txt'), 'utf8')).toBe('B');
+    expect(existsSync(tree)).toBe(true);
   });
 });

@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { connect } from '../src/core/connection';
 import type { SshSession } from '../src/core/connection';
-import { deleteRemote, mkdirRemote, renameRemote } from '../src/core/fileops';
+import { copyRemote, deleteRemote, mkdirRemote, renameRemote } from '../src/core/fileops';
 import { runTransfer } from '../src/core/transfer';
 import { listRemote } from '../src/core/walker';
 import type { AppConfig, TransferEvent, TransferItem } from '../src/types';
@@ -169,5 +169,27 @@ suite('sftp integration (real sshd)', () => {
     await deleteRemote(session, join(server.remoteDir, 'solo.txt'));
     const names = (await listRemote(session, server.remoteDir)).map((e) => e.name);
     expect(names).not.toContain('solo.txt');
+  });
+
+  test('remote copy duplicates a file beside itself', async () => {
+    writeFileSync(join(server.remoteDir, 'c-orig.txt'), 'body\n');
+    await copyRemote(session, join(server.remoteDir, 'c-orig.txt'), 'c-copy.txt');
+    const names = (await listRemote(session, server.remoteDir)).map((e) => e.name);
+    expect(names).toContain('c-orig.txt');
+    expect(names).toContain('c-copy.txt');
+    expect(readFileSync(join(server.remoteDir, 'c-copy.txt'), 'utf8')).toBe('body\n');
+  });
+
+  test('remote delete reports progress for a directory tree', async () => {
+    const tree = join(server.remoteDir, 'progtree');
+    mkdirSync(join(tree, 'sub'), { recursive: true });
+    writeFileSync(join(tree, 'a.txt'), 'A\n');
+    writeFileSync(join(tree, 'sub', 'b.txt'), 'B\n');
+    let lastCount = 0;
+    await deleteRemote(session, tree, (n) => {
+      lastCount = n;
+    });
+    // 2 files + 2 dirs (sub, progtree) = 4 removed entries.
+    expect(lastCount).toBe(4);
   });
 });

@@ -159,6 +159,7 @@ It uses your existing public key (`<privateKeyPath>.pub`, else `~/.ssh/id_ed2551
 | `/` | jump to a path (Tab completes directories) |
 | `n` | make a new directory |
 | `r` | rename the highlighted entry |
+| `c` | copy (duplicate) the highlighted entry |
 | `d` | delete the highlighted entry (asks to confirm) |
 | `g` | go (start transfer) |
 | `Ctrl+C` | quit |

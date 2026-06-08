@@ -4,6 +4,8 @@ import TextInput from 'ink-text-input';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { SshSession } from '../../core/connection';
 import {
+  copyLocal,
+  copyRemote,
   deleteLocal,
   deleteRemote,
   mkdirLocal,
@@ -41,10 +43,10 @@ interface PathBar {
   error: string | null;
 }
 
-// State for the mkdir/rename text input. null when no op is in progress.
+// State for the mkdir/rename/copy text input. null when no op is in progress.
 interface OpBar {
-  kind: 'mkdir' | 'rename';
-  target: FileEntry | null; // the entry being renamed (null for mkdir)
+  kind: 'mkdir' | 'rename' | 'copy';
+  target: FileEntry | null; // the entry being renamed/copied (null for mkdir)
   value: string;
   error: string | null;
 }
@@ -88,6 +90,8 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
   const [opBar, setOpBar] = useState<OpBar | null>(null);
   // Entry pending a delete confirmation; null when not confirming.
   const [pendingDelete, setPendingDelete] = useState<FileEntry | null>(null);
+  // Live count of removed entries while a remote delete runs; null when idle.
+  const [deleteCount, setDeleteCount] = useState<number | null>(null);
   const [opError, setOpError] = useState<string | null>(null);
 
   // Cache directory listings so path-bar completion doesn't re-list (and, for
@@ -275,9 +279,12 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
         if (bar.kind === 'mkdir') {
           if (active === 'local') await mkdirLocal(local.cwd, name);
           else await mkdirRemote(session, remote.cwd, name);
-        } else if (bar.target) {
+        } else if (bar.kind === 'rename' && bar.target) {
           if (active === 'local') await renameLocal(bar.target.path, name);
           else await renameRemote(session, bar.target.path, name);
+        } else if (bar.kind === 'copy' && bar.target) {
+          if (active === 'local') await copyLocal(bar.target.path, name);
+          else await copyRemote(session, bar.target.path, name);
         }
         setOpBar(null);
         setOpError(null);
@@ -291,11 +298,17 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
   function confirmDelete(): void {
     const target = pendingDelete;
     if (!target) return;
+    setPendingDelete(null);
     void (async () => {
       try {
-        if (active === 'local') await deleteLocal(target.path);
-        else await deleteRemote(session, target.path);
-        setPendingDelete(null);
+        if (active === 'local') {
+          await deleteLocal(target.path);
+        } else {
+          // Show a live count while a large remote tree is removed.
+          setDeleteCount(0);
+          await deleteRemote(session, target.path, (n) => setDeleteCount(n));
+        }
+        setDeleteCount(null);
         setOpError(null);
         // Drop any stale selection of the removed path.
         setSelected((prev) => {
@@ -305,7 +318,7 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
         });
         reloadActive();
       } catch (err) {
-        setPendingDelete(null);
+        setDeleteCount(null);
         setOpError(err instanceof Error ? err.message : String(err));
       }
     })();
@@ -394,6 +407,12 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
       if (entry) setOpBar({ kind: 'rename', target: entry, value: entry.name, error: null });
       return;
     }
+    if (input === 'c' || input === 'C') {
+      const entry = activeEntries[state.cursor];
+      if (entry)
+        setOpBar({ kind: 'copy', target: entry, value: `${entry.name}-copy`, error: null });
+      return;
+    }
     if (input === 'd' || input === 'D') {
       const entry = activeEntries[state.cursor];
       if (entry) setPendingDelete(entry);
@@ -469,7 +488,11 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
 
       {opError ? <Text color="red">⚠ {opError}</Text> : null}
 
-      {pendingDelete ? (
+      {deleteCount !== null ? (
+        <Box borderStyle="round" borderColor="yellow" paddingX={1}>
+          <Text color="yellow">Deleting… {deleteCount} item(s) removed</Text>
+        </Box>
+      ) : pendingDelete ? (
         <Box borderStyle="round" borderColor="red" paddingX={1}>
           <Text color="yellow">
             Delete {pendingDelete.isDirectory ? 'directory' : 'file'}{' '}
@@ -481,7 +504,11 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
         <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
           <Box>
             <Text color="cyan">
-              {opBar.kind === 'mkdir' ? 'New directory name: ' : 'Rename to: '}
+              {opBar.kind === 'mkdir'
+                ? 'New directory name: '
+                : opBar.kind === 'copy'
+                  ? 'Copy to name: '
+                  : 'Rename to: '}
             </Text>
             <TextInput
               value={opBar.value}
@@ -527,6 +554,7 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
                 { key: 's', desc: 'sort' },
                 { key: 'n', desc: 'mkdir' },
                 { key: 'r', desc: 'rename' },
+                { key: 'c', desc: 'copy' },
                 { key: 'd', desc: 'delete' },
                 { key: '/', desc: 'go to path' },
                 { key: 'g', desc: 'go' },
