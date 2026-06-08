@@ -3,6 +3,14 @@ import { Box, Text, useInput } from 'ink';
 import TextInput from 'ink-text-input';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { SshSession } from '../../core/connection';
+import {
+  deleteLocal,
+  deleteRemote,
+  mkdirLocal,
+  mkdirRemote,
+  renameLocal,
+  renameRemote,
+} from '../../core/fileops';
 import { listLocal, listRemote } from '../../core/walker';
 import type { ConnectionConfig, FileEntry, TransferDirection, TransferItem } from '../../types';
 import { FileList } from '../components/FileList';
@@ -30,6 +38,14 @@ interface PathBar {
   matches: FileEntry[]; // directories under the typed dir, filtered by prefix
   cursor: number;
   listedDir: string | null; // which dir `matches` came from (for display)
+  error: string | null;
+}
+
+// State for the mkdir/rename text input. null when no op is in progress.
+interface OpBar {
+  kind: 'mkdir' | 'rename';
+  target: FileEntry | null; // the entry being renamed (null for mkdir)
+  value: string;
   error: string | null;
 }
 
@@ -68,6 +84,11 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
   const [pathBar, setPathBar] = useState<PathBar | null>(null);
   // Sort applies to both panes' displayed listings (cursor indexes the sorted order).
   const [sortMode, setSortMode] = useState<SortMode>('name');
+  // mkdir/rename input bar; null when no op in progress.
+  const [opBar, setOpBar] = useState<OpBar | null>(null);
+  // Entry pending a delete confirmation; null when not confirming.
+  const [pendingDelete, setPendingDelete] = useState<FileEntry | null>(null);
+  const [opError, setOpError] = useState<string | null>(null);
 
   // Cache directory listings so path-bar completion doesn't re-list (and, for
   // remote, doesn't make an SSH round-trip) on every keystroke. Keyed `pane:dir`.
@@ -232,7 +253,76 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
     if (items.length > 0) onGo(items, direction);
   }
 
+  // ---- file ops (mkdir / rename / delete) ---------------------------------
+
+  // Reload the active pane and drop its cached listings so a mutation shows up.
+  function reloadActive(): void {
+    listCache.current.clear();
+    if (active === 'local') void loadLocal(local.cwd);
+    else void loadRemote(remote.cwd);
+  }
+
+  function commitOp(): void {
+    if (!opBar) return;
+    const bar = opBar;
+    const name = bar.value.trim();
+    if (!name) {
+      setOpBar({ ...bar, error: 'Name cannot be empty' });
+      return;
+    }
+    void (async () => {
+      try {
+        if (bar.kind === 'mkdir') {
+          if (active === 'local') await mkdirLocal(local.cwd, name);
+          else await mkdirRemote(session, remote.cwd, name);
+        } else if (bar.target) {
+          if (active === 'local') await renameLocal(bar.target.path, name);
+          else await renameRemote(session, bar.target.path, name);
+        }
+        setOpBar(null);
+        setOpError(null);
+        reloadActive();
+      } catch (err) {
+        setOpBar({ ...bar, error: err instanceof Error ? err.message : String(err) });
+      }
+    })();
+  }
+
+  function confirmDelete(): void {
+    const target = pendingDelete;
+    if (!target) return;
+    void (async () => {
+      try {
+        if (active === 'local') await deleteLocal(target.path);
+        else await deleteRemote(session, target.path);
+        setPendingDelete(null);
+        setOpError(null);
+        // Drop any stale selection of the removed path.
+        setSelected((prev) => {
+          const next = new Set(prev);
+          next.delete(target.path);
+          return next;
+        });
+        reloadActive();
+      } catch (err) {
+        setPendingDelete(null);
+        setOpError(err instanceof Error ? err.message : String(err));
+      }
+    })();
+  }
+
   useInput((input, key) => {
+    // Delete-confirm mode: y/n only.
+    if (pendingDelete) {
+      if (input === 'y' || input === 'Y') confirmDelete();
+      else if (input === 'n' || input === 'N' || key.escape) setPendingDelete(null);
+      return;
+    }
+    // mkdir/rename input mode: typed chars go to TextInput; Enter/Esc handled there.
+    if (opBar) {
+      if (key.escape) setOpBar(null);
+      return;
+    }
     // Path-bar mode: only navigation keys act here; typed chars go to TextInput,
     // and Enter is handled by its onSubmit.
     if (pathBar) {
@@ -293,6 +383,20 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
       setSortMode((m) => (m === 'name' ? 'size' : m === 'size' ? 'date' : 'name'));
       setLocal((p) => ({ ...p, cursor: 0 }));
       setRemote((p) => ({ ...p, cursor: 0 }));
+      return;
+    }
+    if (input === 'n' || input === 'N') {
+      setOpBar({ kind: 'mkdir', target: null, value: '', error: null });
+      return;
+    }
+    if (input === 'r' || input === 'R') {
+      const entry = activeEntries[state.cursor];
+      if (entry) setOpBar({ kind: 'rename', target: entry, value: entry.name, error: null });
+      return;
+    }
+    if (input === 'd' || input === 'D') {
+      const entry = activeEntries[state.cursor];
+      if (entry) setPendingDelete(entry);
       return;
     }
     if (input === 'u' || input === 'U' || (key.leftArrow && active)) {
@@ -363,7 +467,31 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
         </Box>
       </Box>
 
-      {pathBar ? (
+      {opError ? <Text color="red">⚠ {opError}</Text> : null}
+
+      {pendingDelete ? (
+        <Box borderStyle="round" borderColor="red" paddingX={1}>
+          <Text color="yellow">
+            Delete {pendingDelete.isDirectory ? 'directory' : 'file'}{' '}
+            <Text bold>{pendingDelete.name}</Text>
+            {pendingDelete.isDirectory ? ' and everything in it' : ''}? (y/n)
+          </Text>
+        </Box>
+      ) : opBar ? (
+        <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
+          <Box>
+            <Text color="cyan">
+              {opBar.kind === 'mkdir' ? 'New directory name: ' : 'Rename to: '}
+            </Text>
+            <TextInput
+              value={opBar.value}
+              onChange={(v) => setOpBar((b) => (b ? { ...b, value: v } : b))}
+              onSubmit={commitOp}
+            />
+          </Box>
+          {opBar.error ? <Text color="red">⚠ {opBar.error}</Text> : null}
+        </Box>
+      ) : pathBar ? (
         <PathBarView
           pane={active}
           bar={pathBar}
@@ -397,6 +525,9 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
                 { key: 'Space', desc: 'select' },
                 { key: 'a', desc: 'select all' },
                 { key: 's', desc: 'sort' },
+                { key: 'n', desc: 'mkdir' },
+                { key: 'r', desc: 'rename' },
+                { key: 'd', desc: 'delete' },
                 { key: '/', desc: 'go to path' },
                 { key: 'g', desc: 'go' },
                 { key: 'Ctrl+C', desc: 'quit' },

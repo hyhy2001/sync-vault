@@ -154,6 +154,12 @@ It uses your existing public key (`<privateKeyPath>.pub`, else `~/.ssh/id_ed2551
 | `⏎` | open directory |
 | `u` | go up a directory |
 | `Space` | select / deselect |
+| `a` | select / deselect all |
+| `s` | cycle sort (name → size → date) |
+| `/` | jump to a path (Tab completes directories) |
+| `n` | make a new directory |
+| `r` | rename the highlighted entry |
+| `d` | delete the highlighted entry (asks to confirm) |
 | `g` | go (start transfer) |
 | `Ctrl+C` | quit |
 

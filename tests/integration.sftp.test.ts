@@ -3,7 +3,9 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { connect } from '../src/core/connection';
 import type { SshSession } from '../src/core/connection';
+import { deleteRemote, mkdirRemote, renameRemote } from '../src/core/fileops';
 import { runTransfer } from '../src/core/transfer';
+import { listRemote } from '../src/core/walker';
 import type { AppConfig, TransferEvent, TransferItem } from '../src/types';
 import { type Sshd, bootSshd, sshdAvailable } from './helpers/sshd';
 
@@ -136,5 +138,36 @@ suite('sftp integration (real sshd)', () => {
     expect(summary.filesTransferred).toBe(0);
     expect(summary.filesFailed).toBe(1);
     expect(summary.errors.length).toBeGreaterThan(0);
+  });
+
+  test('remote mkdir creates a directory', async () => {
+    await mkdirRemote(session, server.remoteDir, 'made');
+    const names = (await listRemote(session, server.remoteDir)).map((e) => e.name);
+    expect(names).toContain('made');
+  });
+
+  test('remote rename moves within the same directory', async () => {
+    writeFileSync(join(server.remoteDir, 'r-old.txt'), 'x\n');
+    await renameRemote(session, join(server.remoteDir, 'r-old.txt'), 'r-new.txt');
+    const names = (await listRemote(session, server.remoteDir)).map((e) => e.name);
+    expect(names).toContain('r-new.txt');
+    expect(names).not.toContain('r-old.txt');
+  });
+
+  test('remote delete recursively removes a directory tree', async () => {
+    const tree = join(server.remoteDir, 'deltree');
+    mkdirSync(join(tree, 'sub'), { recursive: true });
+    writeFileSync(join(tree, 'a.txt'), 'A\n');
+    writeFileSync(join(tree, 'sub', 'b.txt'), 'B\n');
+    await deleteRemote(session, tree);
+    const names = (await listRemote(session, server.remoteDir)).map((e) => e.name);
+    expect(names).not.toContain('deltree');
+  });
+
+  test('remote delete removes a single file', async () => {
+    writeFileSync(join(server.remoteDir, 'solo.txt'), 'x\n');
+    await deleteRemote(session, join(server.remoteDir, 'solo.txt'));
+    const names = (await listRemote(session, server.remoteDir)).map((e) => e.name);
+    expect(names).not.toContain('solo.txt');
   });
 });
