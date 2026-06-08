@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { humanBytes, humanEta, humanSpeed } from '../src/ui/helpers/format';
+import { humanBytes, humanDate, humanEta, humanSpeed } from '../src/ui/helpers/format';
 
 describe('humanBytes', () => {
   test('0 bytes renders as "0 B"', () => {
@@ -88,5 +88,24 @@ describe('humanEta', () => {
 
   test('multi-minute values pad seconds correctly', () => {
     expect(humanEta(605)).toBe('10:05');
+  });
+});
+
+describe('humanDate', () => {
+  test('-1 / zero / non-finite render as "—"', () => {
+    expect(humanDate(0)).toBe('—');
+    expect(humanDate(-1)).toBe('—');
+    expect(humanDate(Number.NaN)).toBe('—');
+  });
+
+  test('formats an epoch-ms timestamp as YYYY-MM-DD', () => {
+    // 2026-06-08 in local time, built from components to avoid TZ flakiness.
+    const ms = new Date(2026, 5, 8, 14, 30).getTime();
+    expect(humanDate(ms)).toBe('2026-06-08');
+  });
+
+  test('pads single-digit month and day', () => {
+    const ms = new Date(2025, 0, 3, 9, 0).getTime();
+    expect(humanDate(ms)).toBe('2025-01-03');
   });
 });

@@ -1,7 +1,7 @@
 import { basename, dirname, join, posix } from 'node:path';
 import { Box, Text, useInput } from 'ink';
 import TextInput from 'ink-text-input';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { SshSession } from '../../core/connection';
 import { listLocal, listRemote } from '../../core/walker';
 import type { ConnectionConfig, FileEntry, TransferDirection, TransferItem } from '../../types';
@@ -43,6 +43,21 @@ const emptyPane = (cwd: string): PaneState => ({
 
 const MATCH_WINDOW = 10;
 
+type SortMode = 'name' | 'size' | 'date';
+
+// Sort entries for display. Directories always group before files; within each
+// group we order by the chosen key (name A→Z, size large→small, date new→old).
+function sortEntries(entries: FileEntry[], mode: SortMode): FileEntry[] {
+  const sorted = [...entries];
+  sorted.sort((a, b) => {
+    if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+    if (mode === 'size') return b.size - a.size || a.name.localeCompare(b.name);
+    if (mode === 'date') return b.mtimeMs - a.mtimeMs || a.name.localeCompare(b.name);
+    return a.name.localeCompare(b.name);
+  });
+  return sorted;
+}
+
 export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
   const [active, setActive] = useState<Pane>('local');
   const [local, setLocal] = useState<PaneState>(() => emptyPane(process.cwd()));
@@ -51,6 +66,8 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
   const [selectedLocal, setSelectedLocal] = useState<Set<string>>(new Set());
   const [selectedRemote, setSelectedRemote] = useState<Set<string>>(new Set());
   const [pathBar, setPathBar] = useState<PathBar | null>(null);
+  // Sort applies to both panes' displayed listings (cursor indexes the sorted order).
+  const [sortMode, setSortMode] = useState<SortMode>('name');
 
   // Cache directory listings so path-bar completion doesn't re-list (and, for
   // remote, doesn't make an SSH round-trip) on every keystroke. Keyed `pane:dir`.
@@ -97,8 +114,21 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
   const joinPath = active === 'local' ? join : posix.join;
   const dirOf = active === 'local' ? dirname : posix.dirname;
 
+  // Sorted views drive both display and cursor reads, so the highlighted row is
+  // always the entry the user sees. Length is sort-invariant, so cursor bounds
+  // computed against the raw lists stay valid.
+  const localEntries = useMemo(
+    () => sortEntries(local.entries, sortMode),
+    [local.entries, sortMode],
+  );
+  const remoteEntries = useMemo(
+    () => sortEntries(remote.entries, sortMode),
+    [remote.entries, sortMode],
+  );
+  const activeEntries = active === 'local' ? localEntries : remoteEntries;
+
   function descend(): void {
-    const entry = state.entries[state.cursor];
+    const entry = activeEntries[state.cursor];
     if (!entry || !entry.isDirectory) return;
     const next = joinPath(state.cwd, entry.name);
     if (active === 'local') void loadLocal(next);
@@ -240,7 +270,7 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
       return;
     }
     if (input === ' ') {
-      const entry = state.entries[state.cursor];
+      const entry = activeEntries[state.cursor];
       if (!entry) return;
       setSelected((prev) => {
         const next = new Set(prev);
@@ -248,6 +278,21 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
         else next.add(entry.path);
         return next;
       });
+      return;
+    }
+    if (input === 'a' || input === 'A') {
+      // Toggle select-all in the active pane: if every entry is already
+      // selected, clear; otherwise select all of them.
+      const current = active === 'local' ? selectedLocal : selectedRemote;
+      const allSelected =
+        activeEntries.length > 0 && activeEntries.every((e) => current.has(e.path));
+      setSelected(() => (allSelected ? new Set() : new Set(activeEntries.map((e) => e.path))));
+      return;
+    }
+    if (input === 's' || input === 'S') {
+      setSortMode((m) => (m === 'name' ? 'size' : m === 'size' ? 'date' : 'name'));
+      setLocal((p) => ({ ...p, cursor: 0 }));
+      setRemote((p) => ({ ...p, cursor: 0 }));
       return;
     }
     if (input === 'u' || input === 'U' || (key.leftArrow && active)) {
@@ -282,7 +327,7 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
             <Text dimColor>loading…</Text>
           ) : (
             <FileList
-              entries={local.entries}
+              entries={localEntries}
               cursor={local.cursor}
               selected={selectedLocal}
               active={active === 'local'}
@@ -309,7 +354,7 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
             <Text dimColor>loading…</Text>
           ) : (
             <FileList
-              entries={remote.entries}
+              entries={remoteEntries}
               cursor={remote.cursor}
               selected={selectedRemote}
               active={active === 'remote'}
@@ -330,7 +375,8 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
         />
       ) : (
         <Text>
-          Selected: <Text color="green">{totalSelected}</Text> file(s)
+          Selected: <Text color="green">{totalSelected}</Text> file(s) · sort:{' '}
+          <Text color="cyan">{sortMode}</Text>
         </Text>
       )}
 
@@ -349,6 +395,8 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
                 { key: '⏎', desc: 'open dir' },
                 { key: 'u', desc: 'up dir' },
                 { key: 'Space', desc: 'select' },
+                { key: 'a', desc: 'select all' },
+                { key: 's', desc: 'sort' },
                 { key: '/', desc: 'go to path' },
                 { key: 'g', desc: 'go' },
                 { key: 'Ctrl+C', desc: 'quit' },

@@ -32,3 +32,13 @@ export function humanEta(seconds: number): string {
   const secs = total % 60;
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 }
+
+// 'YYYY-MM-DD' from an epoch-ms mtime, or '—' when unknown/non-finite.
+export function humanDate(mtimeMs: number): string {
+  if (!Number.isFinite(mtimeMs) || mtimeMs <= 0) return '—';
+  const d = new Date(mtimeMs);
+  const y = d.getFullYear();
+  const m = (d.getMonth() + 1).toString().padStart(2, '0');
+  const day = d.getDate().toString().padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
