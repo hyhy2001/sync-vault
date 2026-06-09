@@ -142,6 +142,14 @@ export function buildSshArgs(conn: ConnectionConfig): string[] {
     // version we target (unlike PubkeyAcceptedAlgorithms, new in 8.5).
     '-o',
     'HostKeyAlgorithms=+ssh-rsa',
+    // Same for pubkey AUTH: OpenSSH >= 8.8 also disables the ssh-rsa (SHA-1)
+    // signature for authentication, so an RSA key in the remote's
+    // authorized_keys is rejected ("permission denied (publickey)") on old
+    // servers that only accept that signature. Use the KeyTypes spelling, which
+    // is the alias valid on every OpenSSH from 7.0 (RHEL8 ships 8.0); the
+    // Algorithms spelling is 8.5+ only and would error on older clients.
+    '-o',
+    'PubkeyAcceptedKeyTypes=+ssh-rsa',
   );
   return args;
 }
