@@ -66,6 +66,11 @@ async function runOne(
   };
   const compression = await computeCompressionDecision(opts);
   process.stderr.write(`transport: ${decisionT.selected} (${decisionT.reason})\n`);
+  if (decisionT.suggestKeySetup) {
+    process.stderr.write(
+      `tip: rsync/scp available but password auth needs local sshpass; run 'sync-vault --setup-key ${conn.name}' once to switch to key auth for the faster transport\n`,
+    );
+  }
 
   const summary = await runTransfer({
     ...opts,

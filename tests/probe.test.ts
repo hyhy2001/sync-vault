@@ -164,3 +164,45 @@ describe('decideTransport with password auth', () => {
     expect(decision.selected).toBe('sftp');
   });
 });
+
+describe('decideTransport suggestKeySetup', () => {
+  test('set when password+no-sshpass forces sftp but rsync exists on both ends', () => {
+    const local = ALL({ sshpass: false });
+    const remote = ALL();
+    const decision = decideTransport(local, remote, DEFAULT_ORDER, true);
+    expect(decision.selected).toBe('sftp');
+    expect(decision.suggestKeySetup).toBe(true);
+  });
+
+  test('set when only scp (not rsync) is available on both ends', () => {
+    const local = ALL({ sshpass: false, rsync: false });
+    const remote = ALL({ rsync: false });
+    const decision = decideTransport(local, remote, DEFAULT_ORDER, true);
+    expect(decision.selected).toBe('sftp');
+    expect(decision.suggestKeySetup).toBe(true);
+  });
+
+  test('NOT set when sshpass is present (rsync selected, nothing to unlock)', () => {
+    const local = ALL({ sshpass: true });
+    const remote = ALL();
+    const decision = decideTransport(local, remote, DEFAULT_ORDER, true);
+    expect(decision.selected).toBe('rsync');
+    expect(decision.suggestKeySetup).toBe(false);
+  });
+
+  test('NOT set under key auth even without sshpass', () => {
+    const local = ALL({ sshpass: false });
+    const remote = ALL();
+    const decision = decideTransport(local, remote, DEFAULT_ORDER, false);
+    expect(decision.selected).toBe('rsync');
+    expect(decision.suggestKeySetup).toBe(false);
+  });
+
+  test('NOT set when no spawn transport exists on both ends (a key would not help)', () => {
+    const local = ALL({ sshpass: false, rsync: false, scp: false });
+    const remote = ALL({ rsync: false, scp: false });
+    const decision = decideTransport(local, remote, DEFAULT_ORDER, true);
+    expect(decision.selected).toBe('sftp');
+    expect(decision.suggestKeySetup).toBe(false);
+  });
+});

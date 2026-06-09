@@ -83,13 +83,22 @@ export function decideTransport(
     }
   };
 
+  // True when we're stuck on slow sftp ONLY because password auth lacks local
+  // sshpass, yet a faster spawn transport exists on both ends — installing an
+  // SSH key would unlock it.
+  const wouldUnlockWithKey =
+    passwordBlocksSpawn && (local.rsync && remote.rsync ? true : local.scp && remote.scp);
+
   for (const kind of order) {
     if (viable(kind)) {
       const reason =
         skipped.length > 0
           ? `Selected ${kind}; skipped ${skipped.join(', ')}.`
           : `Selected ${kind} (first preference, all requirements met).`;
-      return { selected: kind, localProbe: local, remoteProbe: remote, reason };
+      // Only suggest a key when we actually settled for sftp despite a faster
+      // option being one key away.
+      const suggestKeySetup = kind === 'sftp' && wouldUnlockWithKey;
+      return { selected: kind, localProbe: local, remoteProbe: remote, reason, suggestKeySetup };
     }
   }
 
@@ -100,5 +109,6 @@ export function decideTransport(
     localProbe: local,
     remoteProbe: remote,
     reason: `No preferred transport viable (${skipped.join(', ')}); falling back to bundled sftp.`,
+    suggestKeySetup: wouldUnlockWithKey,
   };
 }

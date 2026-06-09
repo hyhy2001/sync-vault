@@ -78,6 +78,10 @@ export interface TransportDecision {
   localProbe: ProbeResult;
   remoteProbe: ProbeResult;
   reason: string;
+  // True when we fell back to slow sftp ONLY because password auth lacks local
+  // sshpass, yet rsync/scp exist on both ends — installing an SSH key (e.g. via
+  // --setup-key) would unlock the faster transport.
+  suggestKeySetup: boolean;
 }
 
 // Progress emitted continuously during a transfer. Drives the TUI speed/ETA display.

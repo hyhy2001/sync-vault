@@ -69,6 +69,13 @@ export function TransferScreen({
         {direction} to {conn.host}
       </Text>
       {transport?.reason ? <Text dimColor>{transport.reason}</Text> : null}
+      {(transport ?? decision).suggestKeySetup ? (
+        <Text color="yellow">
+          Tip: rsync/scp are available but password auth needs local sshpass. Run{' '}
+          <Text bold>sync-vault --setup-key {conn.name}</Text> once to switch to key auth and get
+          the faster transport.
+        </Text>
+      ) : null}
 
       <Box marginTop={1} flexDirection="column">
         <Text>Overall</Text>
