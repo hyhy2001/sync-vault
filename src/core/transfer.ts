@@ -135,6 +135,14 @@ export function buildSshArgs(conn: ConnectionConfig): string[] {
     `ControlPath=${controlPath(conn)}`,
     '-o',
     'ControlPersist=30',
+    // Keepalive: probe every 30s, give up after 3 missed replies (~90s), so a
+    // dead connection (network drop, server hang) fails the transfer instead of
+    // hanging forever. A long transfer has no wall-clock cap, so this is the
+    // only liveness signal.
+    '-o',
+    'ServerAliveInterval=30',
+    '-o',
+    'ServerAliveCountMax=3',
     // Re-enable the legacy ssh-rsa host-key type (disabled by default in
     // OpenSSH >= 8.8) so we can still connect to older servers that only offer
     // an RSA host key. The leading `+` appends, so modern servers keep
