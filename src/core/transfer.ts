@@ -935,10 +935,34 @@ function summarize(opts: RunTransferOptions, p: PartialSummary): TransferSummary
   };
 }
 
-export async function runTransfer(opts: RunTransferOptions): Promise<TransferSummary> {
+// A directory's TransferItem.size is just the inode size (~4KB), not its
+// contents — so totals/ETA would be meaningless for folder transfers. Resolve
+// each directory to the recursive sum of its files (local walk for uploads,
+// remote walk for downloads). Best-effort: a walk failure keeps the original
+// size rather than aborting the transfer over a display value.
+async function resolveItemSizes(opts: RunTransferOptions): Promise<TransferItem[]> {
+  const sumDir = async (item: TransferItem): Promise<number> => {
+    try {
+      const entries =
+        opts.direction === 'upload'
+          ? await walkLocal(item.sourcePath)
+          : await walkRemote(opts.session, item.sourcePath);
+      return entries.reduce((s, e) => (e.isDirectory ? s : s + e.size), 0);
+    } catch {
+      return item.size;
+    }
+  };
+  return Promise.all(
+    opts.items.map(async (it) => (it.isDirectory ? { ...it, size: await sumDir(it) } : it)),
+  );
+}
+
+export async function runTransfer(rawOpts: RunTransferOptions): Promise<TransferSummary> {
   const start = Date.now();
+  const items = await resolveItemSizes(rawOpts);
+  const opts: RunTransferOptions = { ...rawOpts, items };
   const totals: FileTotals = {
-    totalBytesTotal: opts.items.reduce((sum, it) => sum + it.size, 0),
+    totalBytesTotal: items.reduce((sum, it) => sum + it.size, 0),
     totalBytesTransferred: 0,
   };
 

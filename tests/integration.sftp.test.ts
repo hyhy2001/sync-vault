@@ -124,6 +124,37 @@ suite('sftp integration (real sshd)', () => {
     expect(readFileSync(join(dest, 'sub', 'b.txt'), 'utf8')).toBe('B\n');
   });
 
+  test('directory total bytes reflect contents, not the 4KB inode size', async () => {
+    // Regression: a directory item carries the inode size (~4096); the engine
+    // must resolve it to the recursive sum of file bytes so progress/ETA use a
+    // real total instead of showing ~4KB for an arbitrarily large folder.
+    const treeRoot = join(server.localDir, 'sizetree');
+    mkdirSync(join(treeRoot, 'sub'), { recursive: true });
+    writeFileSync(join(treeRoot, 'big.bin'), 'x'.repeat(5000));
+    writeFileSync(join(treeRoot, 'sub', 'small.txt'), 'y'.repeat(100));
+    const dest = join(server.remoteDir, 'sizetree');
+
+    const events: TransferEvent[] = [];
+    const summary = await runTransfer({
+      session,
+      conn: server.conn,
+      direction: 'upload',
+      // Deliberately pass the bogus 4096 inode size the UI would supply.
+      items: [{ sourcePath: treeRoot, destPath: dest, size: 4096, isDirectory: true }],
+      transport: 'sftp',
+      config: baseConfig(),
+      onEvent: (e) => events.push(e),
+    });
+
+    expect(summary.filesFailed).toBe(0);
+    // The progress "total" must be the real content sum (5000 + 100), not 4096.
+    const totals = events
+      .filter((e): e is Extract<TransferEvent, { type: 'progress' }> => e.type === 'progress')
+      .map((e) => e.progress.totalBytesTotal);
+    expect(totals.length).toBeGreaterThan(0);
+    expect(totals.every((t) => t === 5100)).toBe(true);
+  });
+
   test('reports a failure for a missing source file without throwing', async () => {
     const src = join(server.localDir, 'does-not-exist.txt');
     const dest = join(server.remoteDir, 'nope.txt');
