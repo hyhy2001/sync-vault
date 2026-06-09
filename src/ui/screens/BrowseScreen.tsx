@@ -22,6 +22,10 @@ interface BrowseScreenProps {
   session: SshSession;
   conn: ConnectionConfig;
   onGo: (items: TransferItem[], direction: TransferDirection) => void;
+  // A backgrounded transfer's status, shown as a banner. null when none.
+  transferStatus?: 'running' | 'done' | null;
+  // Jump back to the transfer screen (set only when a transfer exists).
+  onViewTransfer?: () => void;
 }
 
 type Pane = 'local' | 'remote';
@@ -76,7 +80,13 @@ function sortEntries(entries: FileEntry[], mode: SortMode): FileEntry[] {
   return sorted;
 }
 
-export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
+export function BrowseScreen({
+  session,
+  conn,
+  onGo,
+  transferStatus,
+  onViewTransfer,
+}: BrowseScreenProps) {
   const [active, setActive] = useState<Pane>('local');
   const [local, setLocal] = useState<PaneState>(() => emptyPane(process.cwd()));
   const [remote, setRemote] = useState<PaneState>(() => emptyPane(conn.remoteBasePath));
@@ -424,6 +434,10 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
     }
     if (input === 'g' || input === 'G') {
       go();
+      return;
+    }
+    if ((input === 't' || input === 'T') && onViewTransfer) {
+      onViewTransfer();
     }
   });
 
@@ -535,6 +549,14 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
         </Text>
       )}
 
+      {transferStatus ? (
+        <Text color={transferStatus === 'running' ? 'yellow' : 'green'}>
+          {transferStatus === 'running'
+            ? '⟳ transfer running in background — press t to view'
+            : '✔ transfer finished — press t to view summary'}
+        </Text>
+      ) : null}
+
       <StatusBar
         hints={
           pathBar
@@ -558,6 +580,7 @@ export function BrowseScreen({ session, conn, onGo }: BrowseScreenProps) {
                 { key: 'd', desc: 'delete' },
                 { key: '/', desc: 'go to path' },
                 { key: 'g', desc: 'go' },
+                ...(transferStatus ? [{ key: 't', desc: 'view transfer' }] : []),
                 { key: 'Ctrl+C', desc: 'quit' },
               ]
         }

@@ -111,12 +111,9 @@ export async function setupKey(
     probe.close();
     verified = true;
   } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
     throw new ConnectionError(
-      `Key was installed on the remote but key login could not be verified, so the saved ` +
-        `password was kept. Check the remote's ~/.ssh permissions (dir 700, authorized_keys 600) ` +
-        `and that ${privateKeyPath} is the right key. Underlying error: ${
-          cause instanceof Error ? cause.message : String(cause)
-        }`,
+      `Key was installed on the remote but key login could not be verified, so the saved password was kept. Check the remote's ~/.ssh permissions (dir 700, authorized_keys 600) and that ${privateKeyPath} is the right key. Underlying error: ${detail}`,
       { cause },
     );
   }

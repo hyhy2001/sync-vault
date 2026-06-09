@@ -11,6 +11,7 @@ import type {
   TransferSummary,
   TransportDecision,
 } from '../types';
+import { useTransfer } from './hooks/useTransfer';
 import { BrowseScreen } from './screens/BrowseScreen';
 import { ConnectScreen } from './screens/ConnectScreen';
 import { DirectionScreen } from './screens/DirectionScreen';
@@ -38,7 +39,10 @@ export function App({ configPathOverride }: AppProps) {
   const [items, setItems] = useState<TransferItem[]>([]);
   const [direction, setDirection] = useState<TransferDirection>('upload');
   const [decision, setDecision] = useState<TransportDecision | null>(null);
-  const [summary, setSummary] = useState<TransferSummary | null>(null);
+
+  // The transfer lifecycle lives here (not inside TransferScreen) so a run keeps
+  // going when the user backgrounds it with Esc and returns to browsing.
+  const transfer = useTransfer();
 
   // Load config on mount (override path wins over auto-discovery). A missing
   // config is not fatal — ConnectScreen falls back to manual entry.
@@ -92,29 +96,42 @@ export function App({ configPathOverride }: AppProps) {
     setPhase('direction');
   }
 
-  // Probe both sides and decide the transport, then enter the transfer phase.
+  // Probe both sides, decide the transport, kick off the run (lifted into App so
+  // it survives backgrounding), then show the transfer screen.
   async function handleDirection(dir: TransferDirection): Promise<void> {
     setDirection(dir);
-    if (!session) return;
+    if (!session || !conn) return;
     const order = config?.transport.preferenceOrder ?? ['rsync', 'scp', 'sftp'];
     const [local, remote] = await Promise.all([probeLocal(), probeRemote(session)]);
     // Password auth (no key) forces sftp when local sshpass is missing.
-    const usingPassword = !!conn?.password && !conn?.privateKeyPath;
-    setDecision(decideTransport(local, remote, order, usingPassword));
+    const usingPassword = !!conn.password && !conn.privateKeyPath;
+    const d = decideTransport(local, remote, order, usingPassword);
+    setDecision(d);
     setPhase('transfer');
-  }
-
-  function handleTransferDone(s: TransferSummary): void {
-    setSummary(s);
-    setPhase('summary');
+    transfer.start({
+      session,
+      conn,
+      direction: dir,
+      items,
+      transport: d.selected,
+      transportDecision: d,
+      config: config ?? fallbackConfig(),
+    });
   }
 
   function handleNewTransfer(): void {
     setItems([]);
     setDecision(null);
-    setSummary(null);
+    transfer.reset();
     setPhase('browse');
   }
+
+  // Derived status of the (single) lifted transfer, for the browse banner.
+  const transferStatus: 'running' | 'done' | null = transfer.running
+    ? 'running'
+    : transfer.summary
+      ? 'done'
+      : null;
 
   if (configError) {
     return (
@@ -154,29 +171,50 @@ export function App({ configPathOverride }: AppProps) {
       );
     case 'browse':
       return session && conn ? (
-        <BrowseScreen session={session} conn={conn} onGo={handleGo} />
+        <BrowseScreen
+          session={session}
+          conn={conn}
+          onGo={handleGo}
+          transferStatus={transferStatus}
+          onViewTransfer={transferStatus ? () => setPhase('transfer') : undefined}
+        />
       ) : (
         <Text color="red">No active session.</Text>
       );
     case 'direction':
-      return <DirectionScreen items={items} suggested={direction} onConfirm={handleDirection} />;
+      return (
+        <DirectionScreen
+          items={items}
+          suggested={direction}
+          onConfirm={handleDirection}
+          onCancel={() => setPhase('browse')}
+        />
+      );
     case 'transfer':
-      return session && conn && decision ? (
+      return conn && decision ? (
         <TransferScreen
-          session={session}
           conn={conn}
           direction={direction}
           items={items}
           decision={decision}
-          config={config ?? fallbackConfig()}
-          onDone={handleTransferDone}
+          progress={transfer.progress}
+          results={transfer.results}
+          transport={transfer.transport}
+          error={transfer.error}
+          running={transfer.running}
+          onBackground={() => setPhase('browse')}
+          onAcknowledge={() => setPhase('summary')}
         />
       ) : (
         <Text>Preparing transfer…</Text>
       );
     case 'summary':
-      return summary ? (
-        <SummaryScreen summary={summary} config={config} onNewTransfer={handleNewTransfer} />
+      return transfer.summary ? (
+        <SummaryScreen
+          summary={transfer.summary}
+          config={config}
+          onNewTransfer={handleNewTransfer}
+        />
       ) : (
         <Text color="red">No summary available.</Text>
       );

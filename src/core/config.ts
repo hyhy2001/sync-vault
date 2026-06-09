@@ -135,7 +135,11 @@ type RawConfig = { connections: RawConnection[]; [key: string]: unknown };
 function defaultRawConfig(): RawConfig {
   return {
     connections: [],
-    transport: { preferenceOrder: ['rsync', 'scp', 'sftp'], compression: 'auto', bandwidthLimitKbps: 0 },
+    transport: {
+      preferenceOrder: ['rsync', 'scp', 'sftp'],
+      compression: 'auto',
+      bandwidthLimitKbps: 0,
+    },
     integrity: { verify: false, algorithm: 'sha256' },
     audit: { logPath: 'audit.jsonl' },
   };

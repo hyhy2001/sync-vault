@@ -1,59 +1,56 @@
 import { basename } from 'node:path';
-import { Box, Text } from 'ink';
-import { useEffect } from 'react';
-import type { SshSession } from '../../core/connection';
+import { Box, Text, useInput } from 'ink';
 import type {
-  AppConfig,
   ConnectionConfig,
   TransferDirection,
   TransferItem,
-  TransferSummary,
+  TransferProgress,
   TransportDecision,
 } from '../../types';
 import { ProgressBar } from '../components/ProgressBar';
+import { StatusBar } from '../components/StatusBar';
 import { humanBytes, humanEta, humanSpeed } from '../helpers/format';
-import { useTransfer } from '../hooks/useTransfer';
+import type { FileResult } from '../hooks/useTransfer';
 
 interface TransferScreenProps {
-  session: SshSession;
   conn: ConnectionConfig;
   direction: TransferDirection;
   items: TransferItem[];
   decision: TransportDecision;
-  config: AppConfig;
-  onDone: (summary: TransferSummary) => void;
+  progress: TransferProgress | null;
+  results: FileResult[];
+  transport: TransportDecision | null;
+  error: string | null;
+  running: boolean;
+  onBackground: () => void;
+  onAcknowledge: () => void;
 }
 
 const RECENT_LIMIT = 6;
 
 export function TransferScreen({
-  session,
   conn,
   direction,
   items,
   decision,
-  config,
-  onDone,
+  progress,
+  results,
+  transport,
+  error,
+  running,
+  onBackground,
+  onAcknowledge,
 }: TransferScreenProps) {
-  const { progress, results, summary, transport, error, start } = useTransfer({
-    session,
-    conn,
-    direction,
-    items,
-    transport: decision.selected,
-    transportDecision: decision,
-    config,
+  useInput((_input, key) => {
+    // Esc backgrounds a running transfer (return to browse, keeps going); once
+    // finished, Esc/Enter acknowledges and moves on to the summary.
+    if (key.escape) {
+      if (running) onBackground();
+      else onAcknowledge();
+    } else if (key.return && !running) {
+      onAcknowledge();
+    }
   });
-
-  // Kick off the transfer once on mount.
-  useEffect(() => {
-    start();
-  }, [start]);
-
-  // When core emits all-done, hand the summary up to App.
-  useEffect(() => {
-    if (summary) onDone(summary);
-  }, [summary, onDone]);
 
   const totalDone = progress?.totalBytesTransferred ?? 0;
   const totalAll = progress?.totalBytesTotal ?? items.reduce((s, it) => s + it.size, 0);
@@ -119,6 +116,17 @@ export function TransferScreen({
           <Text color="red">Transfer error: {error}</Text>
         </Box>
       ) : null}
+
+      <StatusBar
+        hints={
+          running
+            ? [
+                { key: 'Esc', desc: 'background (keep running)' },
+                { key: 'Ctrl+C', desc: 'quit' },
+              ]
+            : [{ key: '⏎', desc: 'continue' }]
+        }
+      />
     </Box>
   );
 }

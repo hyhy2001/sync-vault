@@ -33,9 +33,9 @@ export function SummaryScreen({ summary, config, onNewTransfer }: SummaryScreenP
       });
   }, [summary, config]);
 
-  useInput((input) => {
+  useInput((input, key) => {
     if (input === 'q' || input === 'Q') exit();
-    if (input === 'n' || input === 'N') onNewTransfer();
+    if (input === 'n' || input === 'N' || key.escape) onNewTransfer();
   });
 
   const ok = summary.filesFailed === 0;

@@ -1,4 +1,4 @@
-import { Box, Text } from 'ink';
+import { Box, Text, useInput } from 'ink';
 import SelectInput from 'ink-select-input';
 import type { TransferDirection, TransferItem } from '../../types';
 import { StatusBar } from '../components/StatusBar';
@@ -9,9 +9,14 @@ interface DirectionScreenProps {
   // Direction inferred by BrowseScreen from which pane was the source.
   suggested: TransferDirection;
   onConfirm: (direction: TransferDirection) => void;
+  onCancel: () => void;
 }
 
-export function DirectionScreen({ items, suggested, onConfirm }: DirectionScreenProps) {
+export function DirectionScreen({ items, suggested, onConfirm, onCancel }: DirectionScreenProps) {
+  useInput((_input, key) => {
+    if (key.escape) onCancel();
+  });
+
   const totalBytes = items.reduce((sum, it) => sum + it.size, 0);
   const sourcePane = suggested === 'upload' ? 'LOCAL' : 'REMOTE';
 
@@ -45,6 +50,7 @@ export function DirectionScreen({ items, suggested, onConfirm }: DirectionScreen
         hints={[
           { key: '↑↓', desc: 'choose' },
           { key: '⏎', desc: 'confirm' },
+          { key: 'Esc', desc: 'back' },
           { key: 'Ctrl+C', desc: 'quit' },
         ]}
       />

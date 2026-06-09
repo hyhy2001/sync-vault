@@ -18,10 +18,10 @@ export interface FileResult {
   error?: string;
 }
 
-// Everything TransferScreen needs to render, minus the wiring. The transport
-// decision (which tool) is named separately from the engine's compression
-// `decision` to avoid a field clash — the hook computes compression itself.
-export type UseTransferParams = Omit<RunTransferOptions, 'onEvent' | 'transport' | 'decision'> & {
+// Everything needed to kick off a run. The transport decision (which tool) is
+// named separately from the engine's compression `decision` to avoid a field
+// clash — the hook computes compression itself.
+export type StartParams = Omit<RunTransferOptions, 'onEvent' | 'transport' | 'decision'> & {
   transport: RunTransferOptions['transport'];
   transportDecision: TransportDecision;
 };
@@ -32,25 +32,25 @@ interface UseTransferState {
   summary: TransferSummary | null;
   transport: TransportDecision | null;
   error: string | null;
-  start: () => void;
+  running: boolean;
+  start: (params: StartParams) => void;
+  reset: () => void;
 }
 
-export function useTransfer(params: UseTransferParams): UseTransferState {
+// Owns a single transfer's lifecycle. Held at the App level (not inside the
+// transfer screen) so a run keeps going when the user backgrounds it and
+// returns to browsing.
+export function useTransfer(): UseTransferState {
   const [progress, setProgress] = useState<TransferProgress | null>(null);
   const [results, setResults] = useState<FileResult[]>([]);
   const [summary, setSummary] = useState<TransferSummary | null>(null);
   const [transport, setTransport] = useState<TransportDecision | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [running, setRunning] = useState(false);
 
-  // Mutable accumulators live in refs so the onEvent callback never reads stale
-  // state captured at closure-creation time. We append to the ref array, then
-  // publish a fresh snapshot into state to trigger a render.
+  // Mutable accumulator lives in a ref so the onEvent callback never reads stale
+  // state captured at closure-creation time.
   const resultsRef = useRef<FileResult[]>([]);
-  const startedRef = useRef(false);
-  // Latest params held in a ref so start() (a stable callback) always sees the
-  // current values even though it has an empty dependency list.
-  const paramsRef = useRef(params);
-  paramsRef.current = params;
 
   const handleEvent = useCallback((e: TransferEvent): void => {
     switch (e.type) {
@@ -61,23 +61,18 @@ export function useTransfer(params: UseTransferParams): UseTransferState {
         setProgress(e.progress);
         break;
       case 'file-done': {
-        const next: FileResult = {
-          path: e.item.sourcePath,
-          ok: true,
-          checksumOk: e.checksumOk,
-        };
-        resultsRef.current = [...resultsRef.current, next];
+        resultsRef.current = [
+          ...resultsRef.current,
+          { path: e.item.sourcePath, ok: true, checksumOk: e.checksumOk },
+        ];
         setResults(resultsRef.current);
         break;
       }
       case 'file-error': {
-        const next: FileResult = {
-          path: e.item.sourcePath,
-          ok: false,
-          checksumOk: null,
-          error: e.error,
-        };
-        resultsRef.current = [...resultsRef.current, next];
+        resultsRef.current = [
+          ...resultsRef.current,
+          { path: e.item.sourcePath, ok: false, checksumOk: null, error: e.error },
+        ];
         setResults(resultsRef.current);
         break;
       }
@@ -87,35 +82,50 @@ export function useTransfer(params: UseTransferParams): UseTransferState {
     }
   }, []);
 
-  const start = useCallback((): void => {
-    if (startedRef.current) return; // guard against double-invocation (StrictMode/effects)
-    startedRef.current = true;
-    const p = paramsRef.current;
+  const start = useCallback(
+    (params: StartParams): void => {
+      // Fresh run: clear any prior state.
+      resultsRef.current = [];
+      setResults([]);
+      setProgress(null);
+      setSummary(null);
+      setError(null);
+      setTransport(params.transportDecision);
+      setRunning(true);
 
-    // Surface the pre-computed transport decision immediately so the header
-    // isn't blank on first paint.
-    setTransport(p.transportDecision);
+      const opts = {
+        session: params.session,
+        conn: params.conn,
+        direction: params.direction,
+        items: params.items,
+        transport: params.transport,
+        config: params.config,
+        onEvent: handleEvent,
+      };
 
-    const opts = {
-      session: p.session,
-      conn: p.conn,
-      direction: p.direction,
-      items: p.items,
-      transport: p.transport,
-      config: p.config,
-      onEvent: handleEvent,
-    };
+      // Compute compression (probes both ends) before transferring; without it
+      // the engine defaults to no compression.
+      void computeCompressionDecision(opts)
+        .then((decision) => runTransfer({ ...opts, decision }))
+        .catch((err: unknown) => {
+          setError(err instanceof Error ? err.message : String(err));
+        })
+        .finally(() => setRunning(false));
+    },
+    [handleEvent],
+  );
 
-    // Compute the compression decision (probes both ends) before transferring,
-    // then run. Without this the engine defaults to no compression.
-    void computeCompressionDecision(opts)
-      .then((decision) => runTransfer({ ...opts, decision }))
-      .catch((err: unknown) => {
-        setError(err instanceof Error ? err.message : String(err));
-      });
-  }, [handleEvent]);
+  const reset = useCallback((): void => {
+    resultsRef.current = [];
+    setProgress(null);
+    setResults([]);
+    setSummary(null);
+    setTransport(null);
+    setError(null);
+    setRunning(false);
+  }, []);
 
-  return { progress, results, summary, transport, error, start };
+  return { progress, results, summary, transport, error, running, start, reset };
 }
 
 // Re-export commonly paired types for screen convenience.
