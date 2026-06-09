@@ -1,6 +1,6 @@
 import { Box, Text, useApp, useInput } from 'ink';
 import { useEffect, useState } from 'react';
-import { findConfig, loadConfig } from '../core/config';
+import { defaultConfigPath, findConfig, loadConfig } from '../core/config';
 import type { SshSession } from '../core/connection';
 import { decideTransport, probeLocal, probeRemote } from '../core/probe';
 import type {
@@ -45,10 +45,15 @@ export function App({ configPathOverride }: AppProps) {
   useEffect(() => {
     (async () => {
       try {
-        const path = configPathOverride ?? (await findConfig());
-        if (!path) return;
-        setConfigPath(path);
-        setConfig(await loadConfig(path));
+        const found = configPathOverride ?? (await findConfig());
+        // No file yet: still set a default path so a newly-saved connection has
+        // somewhere to write (the save flow is gated on configPath being set).
+        if (!found) {
+          setConfigPath(defaultConfigPath());
+          return;
+        }
+        setConfigPath(found);
+        setConfig(await loadConfig(found));
       } catch (err) {
         setConfigError(err instanceof Error ? err.message : String(err));
       }

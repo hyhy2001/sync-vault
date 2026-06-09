@@ -128,18 +128,37 @@ export async function loadConfig(path: string): Promise<AppConfig> {
 }
 
 type RawConnection = Record<string, unknown>;
-type RawConfig = { connections: RawConnection[] };
+type RawConfig = { connections: RawConnection[]; [key: string]: unknown };
+
+// A full, schema-valid config with no saved connections — used to seed the file
+// on the very first save when none exists yet.
+function defaultRawConfig(): RawConfig {
+  return {
+    connections: [],
+    transport: { preferenceOrder: ['rsync', 'scp', 'sftp'], compression: 'auto', bandwidthLimitKbps: 0 },
+    integrity: { verify: false, algorithm: 'sha256' },
+    audit: { logPath: 'audit.jsonl' },
+  };
+}
 
 // Read + JSON-parse + validate the on-disk config. We mutate the RAW JSON (not
 // the path-resolved in-memory AppConfig) so writers never persist expanded `~/`
-// or absolute audit paths back over the user's tidy relative values.
-async function readRawConfig(configPath: string): Promise<{ abs: string; data: RawConfig }> {
+// or absolute audit paths back over the user's tidy relative values. When
+// `createIfMissing` is set, a non-existent file yields a fresh default config
+// instead of throwing (so the first save can create it).
+async function readRawConfig(
+  configPath: string,
+  createIfMissing = false,
+): Promise<{ abs: string; data: RawConfig }> {
   const abs = isAbsolute(configPath) ? configPath : resolve(process.cwd(), configPath);
 
   let raw: string;
   try {
     raw = await readFile(abs, 'utf8');
   } catch (cause) {
+    if (createIfMissing && (cause as NodeJS.ErrnoException)?.code === 'ENOENT') {
+      return { abs, data: defaultRawConfig() };
+    }
     throw new ConfigError(`Cannot read config file at ${abs}`, { cause });
   }
 
@@ -190,7 +209,7 @@ export async function switchConnectionToKey(
 // Insert or replace a connection (matched by name). Used to persist a
 // manually-entered connection so the user need not re-type it next time.
 export async function saveConnection(configPath: string, conn: ConnectionConfig): Promise<void> {
-  const { abs, data } = await readRawConfig(configPath);
+  const { abs, data } = await readRawConfig(configPath, true);
   const entry: RawConnection = {
     name: conn.name,
     host: conn.host,

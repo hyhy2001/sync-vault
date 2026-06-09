@@ -2,7 +2,12 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { defaultConfigPath, loadConfig, switchConnectionToKey } from '../src/core/config';
+import {
+  defaultConfigPath,
+  loadConfig,
+  saveConnection,
+  switchConnectionToKey,
+} from '../src/core/config';
 import { ConfigError } from '../src/core/errors';
 import type { AppConfig } from '../src/types';
 
@@ -238,5 +243,49 @@ describe('switchConnectionToKey', () => {
 
     const mode = (await stat(p)).mode & 0o777;
     expect(mode).toBe(0o600);
+  });
+});
+
+describe('saveConnection', () => {
+  const newConn = {
+    name: 'fresh',
+    host: 'example.com',
+    port: 22,
+    username: 'huy',
+    password: 'secret',
+    remoteBasePath: '/srv/files',
+  };
+
+  test('creates a fresh, loadable config when the file does not exist', async () => {
+    const p = join(tmpDir, 'save-create.json');
+    await saveConnection(p, newConn);
+
+    const config = await loadConfig(p);
+    expect(config.connections).toHaveLength(1);
+    expect(config.connections[0]?.name).toBe('fresh');
+    expect(config.connections[0]?.password).toBe('secret');
+    // Defaults seeded for the rest of the config.
+    expect(config.transport.preferenceOrder).toEqual(['rsync', 'scp', 'sftp']);
+  });
+
+  test('writes a newly-created config with 0600 permissions', async () => {
+    const p = join(tmpDir, 'save-perms.json');
+    await saveConnection(p, newConn);
+
+    const mode = (await stat(p)).mode & 0o777;
+    expect(mode).toBe(0o600);
+  });
+
+  test('appends to an existing config and replaces by name', async () => {
+    const p = await writeConfig('save-existing.json', JSON.stringify(validConfig()));
+    await saveConnection(p, newConn);
+    let config = await loadConfig(p);
+    expect(config.connections.map((c) => c.name).sort()).toEqual(['fresh', 'home-server']);
+
+    // Re-saving the same name replaces rather than duplicating.
+    await saveConnection(p, { ...newConn, username: 'changed' });
+    config = await loadConfig(p);
+    expect(config.connections.filter((c) => c.name === 'fresh')).toHaveLength(1);
+    expect(config.connections.find((c) => c.name === 'fresh')?.username).toBe('changed');
   });
 });
