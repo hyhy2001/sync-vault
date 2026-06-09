@@ -203,8 +203,11 @@ async function runRsync(opts: RunTransferOptions, totals: FileTotals): Promise<T
 
   const baseArgs = ['-a', '--partial', '--info=progress2'];
   if (decision.compress) {
-    // rsync uses `zlib` for gzip-equivalent and `zstd` for zstd.
-    baseArgs.push('-z', `--compress-choice=${decision.algorithm === 'gzip' ? 'zlib' : 'zstd'}`);
+    // Plain -z only. rsync >= 3.2 auto-negotiates the best algorithm both ends
+    // support (including zstd), and every older rsync still understands -z
+    // (zlib). --compress-choice is 3.2+ only, so passing it makes an old remote
+    // rsync fail with "unknown option" (exit 12).
+    baseArgs.push('-z');
   }
   if (config.transport.bandwidthLimitKbps > 0) {
     baseArgs.push(`--bwlimit=${config.transport.bandwidthLimitKbps}`);
