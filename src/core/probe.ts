@@ -25,8 +25,10 @@ export async function probeLocal(): Promise<ProbeResult> {
 
 export async function probeRemote(session: SshSession): Promise<ProbeResult> {
   // One round-trip: `command -v` prints a path and exits 0 when each tool exists.
+  // Wrapped in `sh -c` so it runs under POSIX sh even when the remote login shell
+  // is csh/tcsh (where `command -v` is not a builtin and the script would fail).
   const { stdout } = await session.exec(
-    'command -v rsync || true; command -v scp || true; command -v tar || true; command -v zstd || true',
+    "sh -c 'command -v rsync || true; command -v scp || true; command -v tar || true; command -v zstd || true'",
   );
   const out = stdout.toLowerCase();
   const has = (bin: string): boolean =>

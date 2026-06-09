@@ -135,6 +135,13 @@ export function buildSshArgs(conn: ConnectionConfig): string[] {
     `ControlPath=${controlPath(conn)}`,
     '-o',
     'ControlPersist=30',
+    // Re-enable the legacy ssh-rsa host-key type (disabled by default in
+    // OpenSSH >= 8.8) so we can still connect to older servers that only offer
+    // an RSA host key. The leading `+` appends, so modern servers keep
+    // preferring modern algorithms. HostKeyAlgorithms exists in every OpenSSH
+    // version we target (unlike PubkeyAcceptedAlgorithms, new in 8.5).
+    '-o',
+    'HostKeyAlgorithms=+ssh-rsa',
   );
   return args;
 }
